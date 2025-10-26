@@ -1,27 +1,52 @@
+use sha2::{Digest, Sha256};
 use solana_sdk::signature::{Keypair, Signer};
-use sha2::{Sha256, Digest};
+use serde::Serialize;
+
+#[derive(Serialize)]
+struct Output<'a> {
+    pubkey_base58: String,
+    message: &'a str,
+    hash_hex: String,
+    signature_hex: String,
+    // Machine-friendly fields:
+    message_hash_bytes: [u8; 32],   // Serde supports up to 32
+    signature_bytes: Vec<u8>,       // Use Vec for 64-byte signature
+}
 
 fn main() {
-    // Generate or load keypair
+    // Keypair generation (replace with persisted keypair in prod)
     let keypair = Keypair::new();
-    
-    // Message to sign
+
+    // Message and hash (SHA-256)
     let message = "mynameisjulien";
-    
-    // Hash the message
-    let mut hasher = Sha256::new();
-    hasher.update(message.as_bytes());
-    let message_hash = hasher.finalize();
-    
-    // Sign the hash
+    let digest = Sha256::digest(message.as_bytes());      // GenericArray<u8, 32>
+    let digest_bytes: &[u8] = digest.as_ref();            // &[u8]
+    let mut message_hash = [0u8; 32];
+    message_hash.copy_from_slice(digest_bytes);           // [u8; 32]
+
+    // Sign the 32-byte hash (returns solana_sdk::signature::Signature)
     let signature = keypair.sign_message(&message_hash);
-    
-    println!("Public Key: {}", keypair.pubkey());
-    println!("Signature: {}", signature);
-    
-    // Export for client use
-    println!("\nFor test client:");
-    println!("const PUBKEY = '{}'", keypair.pubkey());
-    println!("const MESSAGE_HASH = {:?}", message_hash.as_slice());
-    println!("const SIGNATURE = {:?}", signature.as_ref());
+    let sig_slice: &[u8] = signature.as_ref();            // &[u8; 64]
+    let signature_hex = hex::encode(sig_slice);
+
+    // Human-friendly
+    let pubkey_b58 = keypair.pubkey().to_string();
+    let hash_hex = hex::encode(message_hash);
+
+    println!("Public Key (base58): {}", pubkey_b58);
+    println!("Message: {}", message);
+    println!("Message Hash (sha256, hex): {}", hash_hex);
+    println!("Signature (ed25519, hex): {}", signature_hex);
+
+    // Machine-friendly JSON
+    let out = Output {
+        pubkey_base58: pubkey_b58,
+        message,
+        hash_hex,
+        signature_hex,
+        message_hash_bytes: message_hash,
+        signature_bytes: sig_slice.to_vec(), // Vec<u8> serializes with Serde
+    };
+    println!("\nJSON:");
+    println!("{}", serde_json::to_string_pretty(&out).unwrap());
 }

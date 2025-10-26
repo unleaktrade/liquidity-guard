@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-ed25519-dalek = "2.2.0"
-sha2 = "0.10.9"
-solana-sdk = "3.0.0"
+sha2 = "0.10"
+solana-sdk = "1.18"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
