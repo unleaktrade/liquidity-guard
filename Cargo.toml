@@ -1,0 +1,9 @@
+[package]
+name = "liquidity-guard"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ed25519-dalek = "2.2.0"
+sha2 = "0.10.9"
+solana-sdk = "3.0.0"
