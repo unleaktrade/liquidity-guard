@@ -34,6 +34,7 @@ fn main() {
     let hash_hex = hex::encode(message_hash);
 
     println!("Public Key (base58): {}", pubkey_b58);
+    println!("Secret Key (base58): {}", keypair.to_base58_string()); // modern alternative to bs58::encode(keypair.to_bytes()).into_string();
     println!("Message: {}", message);
     println!("Message Hash (sha256, hex): {}", hash_hex);
     println!("Signature (ed25519, hex): {}", signature_hex);
@@ -47,6 +48,6 @@ fn main() {
         message_hash_bytes: message_hash,
         signature_bytes: sig_slice.to_vec(), // Vec<u8> serializes with Serde
     };
-    println!("\nJSON:");
-    println!("{}", serde_json::to_string_pretty(&out).unwrap());
+    println!("JSON:");
+    println!("{}", serde_json::to_string(&out).unwrap());
 }
