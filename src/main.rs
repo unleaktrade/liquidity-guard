@@ -33,9 +33,9 @@ fn main() {
     let pubkey_b58 = keypair.pubkey().to_string();
     let hash_hex = hex::encode(message_hash);
 
+    println!("Message: {}", message);
     println!("Public Key (base58): {}", pubkey_b58);
     println!("Secret Key (base58): {}", keypair.to_base58_string()); // modern alternative to bs58::encode(keypair.to_bytes()).into_string();
-    println!("Message: {}", message);
     println!("Message Hash (sha256, hex): {}", hash_hex);
     println!("Signature (ed25519, hex): {}", signature_hex);
 
