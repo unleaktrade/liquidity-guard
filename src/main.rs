@@ -1,3 +1,4 @@
+use actix_web::middleware::Logger;
 use actix_web::{web, App, HttpResponse, HttpServer, Result};
 use anyhow::Context;
 use hex;
@@ -117,10 +118,7 @@ async fn get_token_balance(rpc: &RpcClient, owner: &Pubkey, mint: &Pubkey) -> an
     Ok(total)
 }
 
-async fn check(
-    data: web::Json<CheckRequest>,
-    state: web::Data<AppState>,
-) -> Result<HttpResponse> {
+async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Result<HttpResponse> {
     // Parse keys
     let rfq = Pubkey::from_str(&data.rfq)
         .map_err(|e| actix_web::error::ErrorBadRequest(format!("Invalid rfq: {e}")))?;
@@ -162,9 +160,7 @@ async fn check(
     }
     if quote_balance < quote_amount {
         return Ok(HttpResponse::BadRequest().json(ErrorResponse {
-            error: format!(
-                "Insufficient quote: has {quote_balance} needs {quote_amount}"
-            ),
+            error: format!("Insufficient quote: has {quote_balance} needs {quote_amount}"),
         }));
     }
 
@@ -217,7 +213,11 @@ async fn health(state: web::Data<AppState>) -> Result<HttpResponse> {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
+    let filter = "info,actix_web=info,actix_http=info,actix_server=info";
+    env_logger::Builder::from_env(env_logger::Env::default())
+        .filter_level(log::LevelFilter::Info)
+        .parse_filters(filter)
+        .init();
 
     let network = Network::from_env();
     let rpc_url = std::env::var("SOLANA_RPC_URL").unwrap_or_else(|_| network.rpc_url().into());
@@ -242,6 +242,8 @@ async fn main() -> std::io::Result<()> {
 
     HttpServer::new(move || {
         App::new()
+            // Enable access logs for this service only
+            .wrap(Logger::new(r#"%a "%r" %s %b %Dms"#))
             .app_data(state.clone())
             .route("/health", web::get().to(health))
             .route("/check", web::post().to(check))
