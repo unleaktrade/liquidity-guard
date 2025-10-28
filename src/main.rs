@@ -71,6 +71,7 @@ struct CheckResponse {
     service_pubkey: String,    // base58
     service_signature: String, // hex
     timestamp: u64,
+    network: String,
 }
 
 #[derive(Serialize)]
@@ -102,7 +103,7 @@ async fn get_token_balance(rpc: &RpcClient, owner: &Pubkey, mint: &Pubkey) -> an
     let accounts = rpc
         .get_token_accounts_by_owner(owner, TokenAccountsFilter::Mint(*mint))
         .await
-        .context("get_token_accounts_by_owner failed")?;
+        .with_context(|| format!("get_token_accounts_by_owner failed (owner: {}, mint: {})", owner, mint))?;
 
     let mut total: u64 = 0;
     for keyed in accounts {
@@ -194,6 +195,7 @@ async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Res
         service_pubkey: service_pubkey_b58,
         service_signature: hex::encode(signature.as_ref()),
         timestamp: ts,
+        network: format!("{:?}", state.network),
     }))
 }
 
