@@ -51,7 +51,6 @@ impl Network {
 struct CheckRequest {
     rfq: String,
     taker: String,
-    usdc_mint: String,
     quote_mint: String,
     quote_amount: String,
     bond_amount_usdc: String,
@@ -124,7 +123,8 @@ async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Res
         .map_err(|e| actix_web::error::ErrorBadRequest(format!("Invalid rfq: {e}")))?;
     let taker = Pubkey::from_str(&data.taker)
         .map_err(|e| actix_web::error::ErrorBadRequest(format!("Invalid taker: {e}")))?;
-    let usdc_mint = Pubkey::from_str(&data.usdc_mint)
+    let usdc_mint_var = std::env::var("USDC_MINT").expect("USDC_MINT env var required (base58 Keypair)");
+    let usdc_mint = Pubkey::from_str(&usdc_mint_var)
         .map_err(|e| actix_web::error::ErrorBadRequest(format!("Invalid usdc_mint: {e}")))?;
     let quote_mint = Pubkey::from_str(&data.quote_mint)
         .map_err(|e| actix_web::error::ErrorBadRequest(format!("Invalid quote_mint: {e}")))?;
@@ -185,7 +185,7 @@ async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Res
         uuid: uuid.to_string(),
         rfq: data.rfq.clone(),
         taker: data.taker.clone(),
-        usdc_mint: data.usdc_mint.clone(),
+        usdc_mint: usdc_mint.to_string(),
         quote_mint: data.quote_mint.clone(),
         quote_amount: data.quote_amount.clone(),
         bond_amount_usdc: data.bond_amount_usdc.clone(),
@@ -226,7 +226,7 @@ async fn main() -> std::io::Result<()> {
         CommitmentConfig::confirmed(),
     ));
 
-    // SIGNING_KEY is base58 keypair string (like solana-keygen)
+    // SIGNING_KEY is base58 keypair string
     let keypair_b58 =
         std::env::var("SIGNING_KEY").expect("SIGNING_KEY env var required (base58 Keypair)");
     let service_keypair = Arc::new(Keypair::from_base58_string(&keypair_b58));
