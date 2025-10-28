@@ -67,11 +67,11 @@ struct CheckResponse {
     quote_amount: String,
     bond_amount_usdc: String,
     fee_amount_usdc: String,
-    commit_hash: String,       // hex
     service_pubkey: String,    // base58
+    commit_hash: String,       // hex
     service_signature: String, // hex
-    timestamp: u64,
     network: String,
+    timestamp: u64,
 }
 
 #[derive(Serialize)]
