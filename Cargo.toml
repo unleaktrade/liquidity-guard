@@ -6,8 +6,6 @@ edition = "2021"
 [dependencies]
 actix-web = "4.9"
 anyhow = "1.0"
-bs58 = "0.5"
-ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 env_logger = "0.11"
 hex = "0.4"
 log = "0.4"
@@ -21,4 +19,3 @@ uuid = { version = "1.11", features = ["v4"] }
 solana-client = "2.3"
 solana-sdk = "2.3"
 solana-account-decoder = "2.3"
-solana-account-decoder-client-types = "2.3"
