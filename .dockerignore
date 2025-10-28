@@ -1,0 +1,7 @@
+target
+.git
+.env
+Dockerfile
+docker-compose.yml
+**/*.log
+**/.DS_Store

@@ -1,0 +1,29 @@
+name: liquidity-guard
+
+services:
+  liquidity-guard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: liquidity-guard:local
+    container_name: liquidity-guard
+    ports:
+      - "${PORT:-8080}:8080"
+    environment:
+      # Network defaults to devnet inside the service
+      SOLANA_NETWORK: ${SOLANA_NETWORK:-devnet}
+      SOLANA_RPC_URL: ${SOLANA_RPC_URL:-https://api.devnet.solana.com}
+      # Mandatory for startup
+      USDC_MINT: ${USDC_MINT:?must set USDC_MINT (base58 pubkey)}
+      SIGNING_KEY: ${SIGNING_KEY:?must set SIGNING_KEY (base58 keypair)}
+      # Optional: local-only logging without relying on global RUST_LOG
+      # Your binary already initializes logging, so these are not required.
+      # RUST_LOG: ${RUST_LOG:-info}
+      # PORT: ${PORT:-8080}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped

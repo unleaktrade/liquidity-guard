@@ -1,0 +1,7 @@
+# heroku.yml
+build:
+  docker:
+    web: Dockerfile   # or a path like service/Dockerfile if not at root
+# If you want to override Dockerfile CMD, define run.web; otherwise Dockerfile CMD is used.
+# run:
+#   web: /usr/local/bin/liquidity-guard
