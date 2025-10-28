@@ -82,6 +82,7 @@ struct AppState {
     rpc: Arc<RpcClient>,
     service_keypair: Arc<Keypair>,
     network: Network,
+    usdc_mint: Pubkey,
 }
 
 // Parse amount from UiAccountData::Json -> ParsedAccount { parsed: serde_json::Value, ... }
@@ -123,9 +124,6 @@ async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Res
         .map_err(|e| actix_web::error::ErrorBadRequest(format!("Invalid rfq: {e}")))?;
     let taker = Pubkey::from_str(&data.taker)
         .map_err(|e| actix_web::error::ErrorBadRequest(format!("Invalid taker: {e}")))?;
-    let usdc_mint_var = std::env::var("USDC_MINT").expect("USDC_MINT env var required (base58 Keypair)");
-    let usdc_mint = Pubkey::from_str(&usdc_mint_var)
-        .map_err(|e| actix_web::error::ErrorBadRequest(format!("Invalid usdc_mint: {e}")))?;
     let quote_mint = Pubkey::from_str(&data.quote_mint)
         .map_err(|e| actix_web::error::ErrorBadRequest(format!("Invalid quote_mint: {e}")))?;
 
@@ -146,7 +144,7 @@ async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Res
     // Parallel liquidity checks
     let need_usdc = bond_amount.saturating_add(fee_amount);
     let (usdc_balance, quote_balance) = tokio::try_join!(
-        get_token_balance(&state.rpc, &taker, &usdc_mint),
+        get_token_balance(&state.rpc, &taker, &state.usdc_mint),
         get_token_balance(&state.rpc, &taker, &quote_mint),
     )
     .map_err(|e| actix_web::error::ErrorInternalServerError(format!("RPC error: {e}")))?;
@@ -181,11 +179,13 @@ async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Res
         .unwrap()
         .as_secs();
 
+    let usdc_mint_b58 = state.usdc_mint.to_string();
+
     Ok(HttpResponse::Ok().json(CheckResponse {
         uuid: uuid.to_string(),
         rfq: data.rfq.clone(),
         taker: data.taker.clone(),
-        usdc_mint: usdc_mint.to_string(),
+        usdc_mint: usdc_mint_b58,
         quote_mint: data.quote_mint.clone(),
         quote_amount: data.quote_amount.clone(),
         bond_amount_usdc: data.bond_amount_usdc.clone(),
@@ -231,10 +231,16 @@ async fn main() -> std::io::Result<()> {
         std::env::var("SIGNING_KEY").expect("SIGNING_KEY env var required (base58 Keypair)");
     let service_keypair = Arc::new(Keypair::from_base58_string(&keypair_b58));
 
+    let usdc_mint_str =
+        std::env::var("USDC_MINT").expect("USDC_MINT env var is required (base58 Pubkey)");
+    let usdc_mint =
+        Pubkey::from_str(&usdc_mint_str).expect("USDC_MINT must be a valid base58 Pubkey");
+
     let state = web::Data::new(AppState {
         rpc,
         service_keypair,
         network: network.clone(),
+        usdc_mint,
     });
 
     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".into());
