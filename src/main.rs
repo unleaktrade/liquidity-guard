@@ -205,11 +205,17 @@ async fn health(state: web::Data<AppState>) -> Result<HttpResponse> {
         status: &'static str,
         network: String,
         service_pubkey: String,
+        timestamp: u64,
     }
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     Ok(HttpResponse::Ok().json(Health {
         status: "healthy",
         network: format!("{:?}", state.network),
         service_pubkey: state.service_keypair.pubkey().to_string(),
+        timestamp: ts,
     }))
 }
 
