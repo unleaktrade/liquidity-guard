@@ -5,8 +5,9 @@ A minimal REST microservice and Dockerized REST API that validates a taker’s l
 ## How it fits
 
 Use the service output in a Solana preflight instruction that verifies the hash and ECDSA signature on‑chain before running the business logic. See also:
-- (experimental-preflight-sigcheck)[https://github.com/unleaktrade/experimental-preflight-sigcheck]
-- (settlement-engine)[https://github.com/unleaktrade/settlement-engine]
+
+- [experimental-preflight-sigcheck](https://github.com/unleaktrade/experimental-preflight-sigcheck)
+- [settlement-engine](https://github.com/unleaktrade/settlement-engine)
 
 ## Endpoints
 
@@ -21,6 +22,7 @@ Use the service output in a Solana preflight instruction that verifies the hash 
   - Echoed request context and metadata (network, timestamp, service_pubkey)
 
 Validation rules:
+
 - USDC must cover `bond_amount_usdc + fee_amount_usdc`
 - Quote-asset liquidity must cover `quote_amount`
 
@@ -57,7 +59,6 @@ Validation rules:
 }
 ```
 
-
 ## Docker
 
 - Build:  
@@ -67,6 +68,7 @@ Validation rules:
   `docker run -p 8080:8080 --env-file .env liquidity-guard`
 
 Environment variables typically include:
+
 - `SOLANA_NETWORK` (e.g., `devnet` | `mainnet` | `localnet`)
 - `SOLANA_RPC_URL`
 - `SERVICE_SECRET_KEY` (ECDSA)
