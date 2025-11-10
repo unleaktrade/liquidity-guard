@@ -103,7 +103,12 @@ async fn get_token_balance(rpc: &RpcClient, owner: &Pubkey, mint: &Pubkey) -> an
     let accounts = rpc
         .get_token_accounts_by_owner(owner, TokenAccountsFilter::Mint(*mint))
         .await
-        .with_context(|| format!("get_token_accounts_by_owner failed (owner: {}, mint: {})", owner, mint))?;
+        .with_context(|| {
+            format!(
+                "get_token_accounts_by_owner failed (owner: {}, mint: {})",
+                owner, mint
+            )
+        })?;
 
     let mut total: u64 = 0;
     for keyed in accounts {
@@ -169,6 +174,10 @@ async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Res
     hasher.update(uuid.as_bytes());
     hasher.update(rfq.to_bytes());
     hasher.update(taker.to_bytes());
+    hasher.update(quote_mint.to_bytes());
+    hasher.update(quote_amount.to_le_bytes());
+    hasher.update(bond_amount.to_le_bytes());
+    hasher.update(fee_amount.to_le_bytes());
     let commit_hash = hasher.finalize();
 
     // Sign with solana_sdk Keypair
