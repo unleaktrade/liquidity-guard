@@ -84,6 +84,7 @@ struct AppState {
     service_keypair: Arc<Keypair>,
     network: Network,
     usdc_mint: Pubkey,
+    skip_fund_checks: bool,
 }
 
 // Parse amount from UiAccountData::Json -> ParsedAccount { parsed: serde_json::Value, ... }
@@ -215,6 +216,7 @@ async fn health(state: web::Data<AppState>) -> Result<HttpResponse> {
         network: String,
         service_pubkey: String,
         timestamp: u64,
+        skip_fund_checks: bool
     }
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -225,6 +227,7 @@ async fn health(state: web::Data<AppState>) -> Result<HttpResponse> {
         network: format!("{:?}", state.network),
         service_pubkey: state.service_keypair.pubkey().to_string(),
         timestamp: ts,
+        skip_fund_checks: state.skip_fund_checks,
     }))
 }
 
@@ -253,11 +256,16 @@ async fn main() -> std::io::Result<()> {
     let usdc_mint =
         Pubkey::from_str(&usdc_mint_str).expect("USDC_MINT must be a valid base58 Pubkey");
 
+    let skip_fund_checks = std::env::var("SKIP_FUND_CHECKS")
+        .map(|v| v.to_lowercase() == "true" || v == "1")
+        .unwrap_or(false);
+
     let state = web::Data::new(AppState {
         rpc,
         service_keypair,
         network: network.clone(),
         usdc_mint,
+        skip_fund_checks
     });
 
     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".into());
