@@ -43,19 +43,20 @@ Validation rules:
 
 ```json
 {
-  "uuid": "29cc00da-891f-42d4-a49d-23ac00fecf62",
-  "rfq": "6p7BsnxWgNze6wLjhHD9wN6Zo7jEpoFZ9npCDPhsJK8H",
-  "taker": "8GAt381fturbi53tXBKubeKgXAdjKvu4fV7H9sn3z4pZ",
-  "usdc_mint": "5jBqJmY2mKetudVa2XaC8U6UN2BNNirDiTnDEuA6pdyR",
-  "quote_mint": "EoTybYbsuFWfe64MqMqVuVTNgHfQgK6xLu4fvnguy9dN",
-  "quote_amount": "100000000",
-  "bond_amount_usdc": "100000",
-  "fee_amount_usdc": "4567",
-  "service_pubkey": "5gfPFweV3zJovznZqBra3rv5tWJ5EHVzQY1PqvNA4HGg",
-  "commit_hash": "87fe5d66a030f3d3bc7586b91f4100cf2c26e79cbe90a9b603b72fceb8e4b1dd",
-  "service_signature": "2718574104573fd5cadbbe362c517319c3b191add9c3355697049429cc14fd721f01d9a42f6bc6c677aa8d37c9c1c64817b29f640cf6a290c82491180fd39909",
-  "network": "Devnet",
-  "timestamp": 1761865975
+    "uuid": "e115e83c-2016-4481-a42f-56b207060ef1",
+    "rfq": "6p7BsnxWgNze6wLjhHD9wN6Zo7jEpoFZ9npCDPhsJK8H",
+    "taker": "8GAt381fturbi53tXBKubeKgXAdjKvu4fV7H9sn3z4pZ",
+    "usdc_mint": "5jBqJmY2mKetudVa2XaC8U6UN2BNNirDiTnDEuA6pdyR",
+    "quote_mint": "EoTybYbsuFWfe64MqMqVuVTNgHfQgK6xLu4fvnguy9dN",
+    "quote_amount": "100000000",
+    "bond_amount_usdc": "100000",
+    "fee_amount_usdc": "4567",
+    "service_pubkey": "kzzUVbvatfRP5cFkwZVXQaEW4C85nv6KQmh1NZ7yk1y",
+    "commit_hash": "b0e6b6a49f7cb941e289cd8cb5ddcf033dd9a5302e10ddbf7cfc34c523f70895",
+    "service_signature": "2910b9d2875a56ee06bf8d862172b9594587bda6ec41f2d24d7726c11d0bf5b592c73e38641dd4222b86042fc9eeb4ff4dc4cd9436bcd7995fb253db729c7801",
+    "network": "Devnet",
+    "skip_fund_checks": false,
+    "timestamp": 1762960679
 }
 ```
 
@@ -73,6 +74,7 @@ Environment variables typically include:
 - `SOLANA_RPC_URL`
 - `SERVICE_SECRET_KEY` (ECDSA)
 - `USDC_MINT`
+- `SKIP_FUND_CHECKS` (for CI/CD purposes)
 
 ## Quick start
 
