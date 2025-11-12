@@ -71,6 +71,7 @@ struct CheckResponse {
     commit_hash: String,       // hex
     service_signature: String, // hex
     network: String,
+    skip_fund_checks: bool,
     timestamp: u64,
 }
 
@@ -149,24 +150,26 @@ async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Res
         .map_err(|e| actix_web::error::ErrorBadRequest(format!("Invalid fee_amount_usdc: {e}")))?;
 
     // Parallel liquidity checks
-    let need_usdc = bond_amount.saturating_add(fee_amount);
-    let (usdc_balance, quote_balance) = tokio::try_join!(
-        get_token_balance(&state.rpc, &taker, &state.usdc_mint),
-        get_token_balance(&state.rpc, &taker, &quote_mint),
-    )
-    .map_err(|e| actix_web::error::ErrorInternalServerError(format!("RPC error: {e}")))?;
+    if !state.skip_fund_checks {
+        let need_usdc = bond_amount.saturating_add(fee_amount);
+        let (usdc_balance, quote_balance) = tokio::try_join!(
+            get_token_balance(&state.rpc, &taker, &state.usdc_mint),
+            get_token_balance(&state.rpc, &taker, &quote_mint),
+        )
+        .map_err(|e| actix_web::error::ErrorInternalServerError(format!("RPC error: {e}")))?;
 
-    if usdc_balance < need_usdc {
-        return Ok(HttpResponse::BadRequest().json(ErrorResponse {
+        if usdc_balance < need_usdc {
+            return Ok(HttpResponse::BadRequest().json(ErrorResponse {
             error: format!(
                 "Insufficient USDC: has {usdc_balance} needs {need_usdc} (bond {bond_amount}, fee {fee_amount})"
             ),
         }));
-    }
-    if quote_balance < quote_amount {
-        return Ok(HttpResponse::BadRequest().json(ErrorResponse {
-            error: format!("Insufficient quote: has {quote_balance} needs {quote_amount}"),
-        }));
+        }
+        if quote_balance < quote_amount {
+            return Ok(HttpResponse::BadRequest().json(ErrorResponse {
+                error: format!("Insufficient quote: has {quote_balance} needs {quote_amount}"),
+            }));
+        }
     }
 
     // Commit hash: uuid || rfq || taker
@@ -205,6 +208,7 @@ async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Res
         service_pubkey: service_pubkey_b58,
         service_signature: hex::encode(signature.as_ref()),
         timestamp: ts,
+        skip_fund_checks: state.skip_fund_checks,
         network: format!("{:?}", state.network),
     }))
 }
@@ -216,7 +220,7 @@ async fn health(state: web::Data<AppState>) -> Result<HttpResponse> {
         network: String,
         service_pubkey: String,
         timestamp: u64,
-        skip_fund_checks: bool
+        skip_fund_checks: bool,
     }
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -265,7 +269,7 @@ async fn main() -> std::io::Result<()> {
         service_keypair,
         network: network.clone(),
         usdc_mint,
-        skip_fund_checks
+        skip_fund_checks,
     });
 
     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".into());
