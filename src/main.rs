@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use solana_account_decoder::{parse_account_data::ParsedAccount, UiAccountData};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::rpc_request::TokenAccountsFilter;
+use solana_sdk::signature::Signature;
 use solana_sdk::{
     commitment_config::CommitmentConfig,
     pubkey::Pubkey,
@@ -133,6 +134,27 @@ async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Res
         .map_err(|e| actix_web::error::ErrorBadRequest(format!("Invalid taker: {e}")))?;
     let quote_mint = Pubkey::from_str(&data.quote_mint)
         .map_err(|e| actix_web::error::ErrorBadRequest(format!("Invalid quote_mint: {e}")))?;
+
+    //50f8f2e8b2bdd78400b8f20d9e526be2b7aab3346fdd043d84b35ad6ef4a5791434f243f5d84835bacc0ebfe32ba71b117a5da1301bad9ec4e297c8835387c0d
+    let salt_bytes_vec = hex::decode(&data.salt).map_err(|e| {
+        actix_web::error::ErrorBadRequest(format!(
+            "Invalid salt hex format for '{}': {}",
+            data.salt, e
+        ))
+    })?;
+    let salt_bytes = salt_bytes_vec.as_slice();
+    let salt = Signature::try_from(salt_bytes).map_err(|e| {
+        actix_web::error::ErrorBadRequest(format!("Invalid salt format for '{}': {}", data.salt, e))
+    })?;
+    if !salt.verify(&taker.to_bytes(), &rfq.to_bytes()) {
+        return Ok(HttpResponse::BadRequest().json(ErrorResponse {
+            error: format!(
+                "Invalid signature for salt {} with public key {}",
+                data.salt,
+                data.taker.clone()
+            ),
+        }));
+    }
 
     // Parse amounts
     let quote_amount: u64 = data
