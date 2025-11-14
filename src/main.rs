@@ -61,6 +61,7 @@ struct CheckRequest {
 #[derive(Serialize)]
 struct CheckResponse {
     rfq: String,
+    salt: String,
     taker: String,
     usdc_mint: String,
     quote_mint: String,
@@ -146,12 +147,14 @@ async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Res
     let salt = Signature::try_from(salt_bytes).map_err(|e| {
         actix_web::error::ErrorBadRequest(format!("Invalid salt format for '{}': {}", data.salt, e))
     })?;
-    if !salt.verify(&taker.to_bytes(), &rfq.to_bytes()) {
+    // Verify salt is valid signature of (taker || rfq)
+    if !salt.verify(&taker.as_ref(), &rfq.as_ref()) {
         return Ok(HttpResponse::BadRequest().json(ErrorResponse {
             error: format!(
-                "Invalid signature for salt {} with public key {}",
+                "Invalid salt {} for taker {} and rfq {}",
                 data.salt,
-                data.taker.clone()
+                data.taker.clone(),
+                data.rfq.clone(),
             ),
         }));
     }
@@ -195,10 +198,10 @@ async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Res
 
     // Commit hash
     let mut hasher = Sha256::new();
-    //hasher.update(uuid.as_bytes());
-    hasher.update(rfq.to_bytes());
-    hasher.update(taker.to_bytes());
-    hasher.update(quote_mint.to_bytes());
+    hasher.update(&salt_bytes);
+    hasher.update(rfq.as_ref());
+    hasher.update(taker.as_ref());
+    hasher.update(quote_mint.as_ref());
     hasher.update(quote_amount.to_le_bytes());
     hasher.update(bond_amount.to_le_bytes());
     hasher.update(fee_amount.to_le_bytes());
@@ -217,6 +220,7 @@ async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Res
 
     Ok(HttpResponse::Ok().json(CheckResponse {
         rfq: data.rfq.clone(),
+        salt: data.salt.clone(),
         taker: data.taker.clone(),
         usdc_mint: usdc_mint_b58,
         quote_mint: data.quote_mint.clone(),
