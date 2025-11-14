@@ -18,7 +18,6 @@ use std::{
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
-use uuid::Uuid;
 
 #[derive(Debug, Clone)]
 enum Network {
@@ -50,6 +49,7 @@ impl Network {
 #[derive(Deserialize)]
 struct CheckRequest {
     rfq: String,
+    salt: String,
     taker: String,
     quote_mint: String,
     quote_amount: String,
@@ -59,7 +59,6 @@ struct CheckRequest {
 
 #[derive(Serialize)]
 struct CheckResponse {
-    uuid: String,
     rfq: String,
     taker: String,
     usdc_mint: String,
@@ -172,10 +171,9 @@ async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Res
         }
     }
 
-    // Commit hash: uuid || rfq || taker
-    let uuid = Uuid::new_v4();
+    // Commit hash
     let mut hasher = Sha256::new();
-    hasher.update(uuid.as_bytes());
+    //hasher.update(uuid.as_bytes());
     hasher.update(rfq.to_bytes());
     hasher.update(taker.to_bytes());
     hasher.update(quote_mint.to_bytes());
@@ -196,7 +194,6 @@ async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Res
     let usdc_mint_b58 = state.usdc_mint.to_string();
 
     Ok(HttpResponse::Ok().json(CheckResponse {
-        uuid: uuid.to_string(),
         rfq: data.rfq.clone(),
         taker: data.taker.clone(),
         usdc_mint: usdc_mint_b58,
