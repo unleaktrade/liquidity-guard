@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use solana_account_decoder::{parse_account_data::ParsedAccount, UiAccountData};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::rpc_request::TokenAccountsFilter;
+use solana_sdk::signature::Signature;
 use solana_sdk::{
     commitment_config::CommitmentConfig,
     pubkey::Pubkey,
@@ -18,7 +19,6 @@ use std::{
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
-use uuid::Uuid;
 
 #[derive(Debug, Clone)]
 enum Network {
@@ -50,6 +50,7 @@ impl Network {
 #[derive(Deserialize)]
 struct CheckRequest {
     rfq: String,
+    salt: String,
     taker: String,
     quote_mint: String,
     quote_amount: String,
@@ -59,8 +60,8 @@ struct CheckRequest {
 
 #[derive(Serialize)]
 struct CheckResponse {
-    uuid: String,
     rfq: String,
+    salt: String,
     taker: String,
     usdc_mint: String,
     quote_mint: String,
@@ -135,6 +136,29 @@ async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Res
     let quote_mint = Pubkey::from_str(&data.quote_mint)
         .map_err(|e| actix_web::error::ErrorBadRequest(format!("Invalid quote_mint: {e}")))?;
 
+    //50f8f2e8b2bdd78400b8f20d9e526be2b7aab3346fdd043d84b35ad6ef4a5791434f243f5d84835bacc0ebfe32ba71b117a5da1301bad9ec4e297c8835387c0d
+    let salt_bytes_vec = hex::decode(&data.salt).map_err(|e| {
+        actix_web::error::ErrorBadRequest(format!(
+            "Invalid salt hex format for '{}': {}",
+            data.salt, e
+        ))
+    })?;
+    let salt_bytes = salt_bytes_vec.as_slice();
+    let salt = Signature::try_from(salt_bytes).map_err(|e| {
+        actix_web::error::ErrorBadRequest(format!("Invalid salt format for '{}': {}", data.salt, e))
+    })?;
+    // Verify salt is valid signature of (taker || rfq)
+    if !salt.verify(&taker.as_ref(), &rfq.as_ref()) {
+        return Ok(HttpResponse::BadRequest().json(ErrorResponse {
+            error: format!(
+                "Invalid salt {} for taker {} and rfq {}",
+                data.salt,
+                data.taker.clone(),
+                data.rfq.clone(),
+            ),
+        }));
+    }
+
     // Parse amounts
     let quote_amount: u64 = data
         .quote_amount
@@ -172,13 +196,12 @@ async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Res
         }
     }
 
-    // Commit hash: uuid || rfq || taker
-    let uuid = Uuid::new_v4();
+    // Commit hash
     let mut hasher = Sha256::new();
-    hasher.update(uuid.as_bytes());
-    hasher.update(rfq.to_bytes());
-    hasher.update(taker.to_bytes());
-    hasher.update(quote_mint.to_bytes());
+    hasher.update(&salt_bytes);
+    hasher.update(rfq.as_ref());
+    hasher.update(taker.as_ref());
+    hasher.update(quote_mint.as_ref());
     hasher.update(quote_amount.to_le_bytes());
     hasher.update(bond_amount.to_le_bytes());
     hasher.update(fee_amount.to_le_bytes());
@@ -196,8 +219,8 @@ async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Res
     let usdc_mint_b58 = state.usdc_mint.to_string();
 
     Ok(HttpResponse::Ok().json(CheckResponse {
-        uuid: uuid.to_string(),
         rfq: data.rfq.clone(),
+        salt: data.salt.clone(),
         taker: data.taker.clone(),
         usdc_mint: usdc_mint_b58,
         quote_mint: data.quote_mint.clone(),
