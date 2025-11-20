@@ -70,7 +70,7 @@ struct CheckResponse {
     fee_amount_usdc: String,
     service_pubkey: String,    // base58
     commit_hash: String,       // hex
-    service_signature: String, // hex
+    liquidity_proof: String, // hex
     network: String,
     skip_fund_checks: bool,
     timestamp: u64,
@@ -229,7 +229,7 @@ async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Res
         fee_amount_usdc: data.fee_amount_usdc.clone(),
         commit_hash: hex::encode(commit_hash),
         service_pubkey: service_pubkey_b58,
-        service_signature: hex::encode(signature.as_ref()),
+        liquidity_proof: hex::encode(signature.as_ref()),
         timestamp: ts,
         skip_fund_checks: state.skip_fund_checks,
         network: format!("{:?}", state.network),

@@ -18,7 +18,7 @@ Use the service output in a Solana preflight instruction that verifies the hash 
   Validates taker liquidity for the RFQ and responds with:
   - `uuid`: unique request identifier
   - `commit_hash`: deterministic hash derived from `uuid` and RFQ fields
-  - `service_signature`: ECDSA signature of `commit_hash` using the service key
+  - `liquidity_proof`: ECDSA signature of `commit_hash` using the service key
   - Echoed request context and metadata (network, timestamp, service_pubkey)
 
 Validation rules:
@@ -30,12 +30,13 @@ Validation rules:
 
 ```json
 {
-  "rfq": "6p7BsnxWgNze6wLjhHD9wN6Zo7jEpoFZ9npCDPhsJK8H",
+  "rfq": "6p7BsnxWgNze6wLjhHD9wN6Zo7jEpoFZ9npCDPhsJK8H",   
   "taker": "8GAt381fturbi53tXBKubeKgXAdjKvu4fV7H9sn3z4pZ",
-  "quote_mint": "EoTybYbsuFWfe64MqMqVuVTNgHfQgK6xLu4fvnguy9dN",
-  "quote_amount": "100000000",
-  "bond_amount_usdc": "100000",
-  "fee_amount_usdc": "4567"
+  "salt": "50f8f2e8b2bdd78400b8f20d9e526be2b7aab3346fdd043d84b35ad6ef4a5791434f243f5d84835bacc0ebfe32ba71b117a5da1301bad9ec4e297c8835387c0d",
+  "quote_mint": "EoTybYbsuFWfe64MqMqVuVTNgHfQgK6xLu4fvnguy9dN", 
+  "quote_amount": "100000000",      
+  "bond_amount_usdc": "100000",    
+  "fee_amount_usdc": "4567"          
 }
 ```
 
@@ -43,20 +44,20 @@ Validation rules:
 
 ```json
 {
-    "uuid": "e115e83c-2016-4481-a42f-56b207060ef1",
     "rfq": "6p7BsnxWgNze6wLjhHD9wN6Zo7jEpoFZ9npCDPhsJK8H",
+    "salt": "50f8f2e8b2bdd78400b8f20d9e526be2b7aab3346fdd043d84b35ad6ef4a5791434f243f5d84835bacc0ebfe32ba71b117a5da1301bad9ec4e297c8835387c0d",
     "taker": "8GAt381fturbi53tXBKubeKgXAdjKvu4fV7H9sn3z4pZ",
     "usdc_mint": "5jBqJmY2mKetudVa2XaC8U6UN2BNNirDiTnDEuA6pdyR",
     "quote_mint": "EoTybYbsuFWfe64MqMqVuVTNgHfQgK6xLu4fvnguy9dN",
     "quote_amount": "100000000",
     "bond_amount_usdc": "100000",
     "fee_amount_usdc": "4567",
-    "service_pubkey": "kzzUVbvatfRP5cFkwZVXQaEW4C85nv6KQmh1NZ7yk1y",
-    "commit_hash": "b0e6b6a49f7cb941e289cd8cb5ddcf033dd9a5302e10ddbf7cfc34c523f70895",
-    "service_signature": "2910b9d2875a56ee06bf8d862172b9594587bda6ec41f2d24d7726c11d0bf5b592c73e38641dd4222b86042fc9eeb4ff4dc4cd9436bcd7995fb253db729c7801",
+    "service_pubkey": "5gfPFweV3zJovznZqBra3rv5tWJ5EHVzQY1PqvNA4HGg",
+    "commit_hash": "d3fbfcb128eea470df1b44faaa57f65f4d1009e9723dc22ea25b1be89ba103a2",
+    "liquidity_proof": "77fd13bc03761e59bef613a60d9bcd013d79d0b152fd28e24c60dfbe8bc3daeb40bda9b7d348ca05c544b16ae489fbd350dab85ed94e82d7c006562aa4352b0d",
     "network": "Devnet",
-    "skip_fund_checks": false,
-    "timestamp": 1762960679
+    "skip_fund_checks": true,
+    "timestamp": 1763639964
 }
 ```
 
@@ -81,7 +82,7 @@ Environment variables typically include:
 1. Configure environment (.env) with network, RPC, signing key, and mints.  
 2. Build and run with Cargo or Docker.  
 3. Call `/health` to confirm network and retrieve the service public key.  
-4. Call `/check` with RFQ details; pass `uuid`, `commit_hash`, and `service_signature` into your preflight program instruction.
+4. Call `/check` with RFQ details; pass `commit_hash`, and `liquidity_proof` into your preflight program instruction (SOLANA).
 
 ## Notes
 
