@@ -23,20 +23,21 @@ Use the service output in a Solana preflight instruction that verifies the hash 
 
 Validation rules:
 
-- USDC must cover `bond_amount_usdc + fee_amount_usdc`
+- USDC must cover `bond_amount_usdc`
 - Quote-asset liquidity must cover `quote_amount`
+- `taker_fee_bps` must not exceed 10,000 (100% in basis points)
 
 ### Check - Request example
 
 ```json
 {
-  "rfq": "6p7BsnxWgNze6wLjhHD9wN6Zo7jEpoFZ9npCDPhsJK8H",   
+  "rfq": "6p7BsnxWgNze6wLjhHD9wN6Zo7jEpoFZ9npCDPhsJK8H",
   "taker": "8GAt381fturbi53tXBKubeKgXAdjKvu4fV7H9sn3z4pZ",
   "salt": "50f8f2e8b2bdd78400b8f20d9e526be2b7aab3346fdd043d84b35ad6ef4a5791434f243f5d84835bacc0ebfe32ba71b117a5da1301bad9ec4e297c8835387c0d",
-  "quote_mint": "EoTybYbsuFWfe64MqMqVuVTNgHfQgK6xLu4fvnguy9dN", 
-  "quote_amount": "100000000",      
-  "bond_amount_usdc": "100000",    
-  "fee_amount_usdc": "4567"          
+  "quote_mint": "EoTybYbsuFWfe64MqMqVuVTNgHfQgK6xLu4fvnguy9dN",
+  "quote_amount": "100000000",
+  "bond_amount_usdc": "100000",
+  "taker_fee_bps": 50
 }
 ```
 
@@ -51,10 +52,10 @@ Validation rules:
     "quote_mint": "EoTybYbsuFWfe64MqMqVuVTNgHfQgK6xLu4fvnguy9dN",
     "quote_amount": "100000000",
     "bond_amount_usdc": "100000",
-    "fee_amount_usdc": "4567",
+    "taker_fee_bps": 50,
     "service_pubkey": "5gfPFweV3zJovznZqBra3rv5tWJ5EHVzQY1PqvNA4HGg",
-    "commit_hash": "d3fbfcb128eea470df1b44faaa57f65f4d1009e9723dc22ea25b1be89ba103a2",
-    "liquidity_proof": "77fd13bc03761e59bef613a60d9bcd013d79d0b152fd28e24c60dfbe8bc3daeb40bda9b7d348ca05c544b16ae489fbd350dab85ed94e82d7c006562aa4352b0d",
+    "commit_hash": "a1b2c3d4e5f6...",
+    "liquidity_proof": "0a1b2c3d4e5f...",
     "network": "Devnet",
     "skip_fund_checks": true,
     "timestamp": 1763639964
@@ -84,7 +85,25 @@ Environment variables typically include:
 3. Call `/health` to confirm network and retrieve the service public key.  
 4. Call `/check` with RFQ details; pass `commit_hash`, and `liquidity_proof` into your preflight program instruction (SOLANA).
 
+## Hash Pre-Image
+
+The `commit_hash` is a SHA-256 digest over a 186-byte buffer:
+
+| Field          | Bytes | Type       |
+|----------------|-------|------------|
+| salt           | 64    | [u8; 64]   |
+| rfq            | 32    | Pubkey     |
+| taker          | 32    | Pubkey     |
+| quote_mint     | 32    | Pubkey     |
+| quote_amount   | 8     | u64 (LE)   |
+| bond_amount    | 8     | u64 (LE)   |
+| taker_fee_bps  | 2     | u16 (LE)   |
+| **Total**      | **186** |          |
+
+The on-chain verifier must construct the same buffer to validate signatures.
+
 ## Notes
 
-- Keep the signing key secure and rotate as needed; clients should read the active public key from `/health`.  
-- Keep `commit_hash` construction identical between the service and on‑chain verifier to ensure signatures validate.
+- Keep the signing key secure and rotate as needed; clients should read the active public key from `/health`.
+- Keep `commit_hash` construction identical between the service and on-chain verifier to ensure signatures validate.
+- `taker_fee_bps` is a basis-point value (0–10,000) representing the taker fee percentage. Zero is valid for no-fee scenarios.
