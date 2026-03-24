@@ -37,7 +37,7 @@ Validation rules:
   "quote_mint": "EoTybYbsuFWfe64MqMqVuVTNgHfQgK6xLu4fvnguy9dN",
   "quote_amount": "100000000",
   "bond_amount_usdc": "100000",
-  "taker_fee_bps": 50
+  "taker_fee_bps": "50"
 }
 ```
 
@@ -52,10 +52,10 @@ Validation rules:
     "quote_mint": "EoTybYbsuFWfe64MqMqVuVTNgHfQgK6xLu4fvnguy9dN",
     "quote_amount": "100000000",
     "bond_amount_usdc": "100000",
-    "taker_fee_bps": 50,
+    "taker_fee_bps": "50",
     "service_pubkey": "5gfPFweV3zJovznZqBra3rv5tWJ5EHVzQY1PqvNA4HGg",
-    "commit_hash": "a1b2c3d4e5f6...",
-    "liquidity_proof": "0a1b2c3d4e5f...",
+    "commit_hash": "d3fbfcb128eea470df1b44faaa57f65f4d1009e9723dc22ea25b1be89ba103a2",
+    "liquidity_proof": "77fd13bc03761e59bef613a60d9bcd013d79d0b152fd28e24c60dfbe8bc3daeb40bda9b7d348ca05c544b16ae489fbd350dab85ed94e82d7c006562aa4352b0d",
     "network": "Devnet",
     "skip_fund_checks": true,
     "timestamp": 1763639964
