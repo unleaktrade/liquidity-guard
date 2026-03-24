@@ -70,13 +70,16 @@ Validation rules:
 - Run:  
   `docker run -p 8080:8080 --env-file .env liquidity-guard`
 
-Environment variables typically include:
+Environment variables:
 
-- `SOLANA_NETWORK` (e.g., `devnet` | `mainnet` | `localnet`)
-- `SOLANA_RPC_URL`
-- `SERVICE_SECRET_KEY` (ECDSA)
-- `USDC_MINT`
-- `SKIP_FUND_CHECKS` (for CI/CD purposes)
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `SIGNING_KEY` | **Yes** | — | Base58-encoded keypair for ECDSA signing |
+| `USDC_MINT` | **Yes** | — | Base58-encoded USDC mint pubkey |
+| `SOLANA_NETWORK` | No | — | `devnet`, `mainnet`, or `localnet` |
+| `SOLANA_RPC_URL` | No | Derived from network | Solana RPC endpoint |
+| `SKIP_FUND_CHECKS` | No | `false` | Skip on-chain balance checks (CI/CD) |
+| `PORT` | No | `8080` | HTTP listen port |
 
 ## Quick start
 
