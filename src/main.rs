@@ -55,7 +55,7 @@ struct CheckRequest {
     quote_mint: String,
     quote_amount: String,
     bond_amount_usdc: String,
-    fee_amount_usdc: String,
+    taker_fee_bps: String,
 }
 
 #[derive(Serialize)]
@@ -67,7 +67,7 @@ struct CheckResponse {
     quote_mint: String,
     quote_amount: String,
     bond_amount_usdc: String,
-    fee_amount_usdc: String,
+    taker_fee_bps: String,
     service_pubkey: String,    // base58
     commit_hash: String,       // hex
     liquidity_proof: String, // hex
@@ -168,26 +168,34 @@ async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Res
         .bond_amount_usdc
         .parse()
         .map_err(|e| actix_web::error::ErrorBadRequest(format!("Invalid bond_amount_usdc: {e}")))?;
-    let fee_amount: u64 = data
-        .fee_amount_usdc
+    let taker_fee_bps: u16 = data
+        .taker_fee_bps
         .parse()
-        .map_err(|e| actix_web::error::ErrorBadRequest(format!("Invalid fee_amount_usdc: {e}")))?;
+        .map_err(|e| actix_web::error::ErrorBadRequest(format!("Invalid taker_fee_bps: {e}")))?;
+    if taker_fee_bps > 10_000 {
+        return Ok(HttpResponse::BadRequest().json(ErrorResponse {
+            error: format!(
+                "taker_fee_bps must not exceed 10000 (100%), got {taker_fee_bps}"
+            ),
+        }));
+    }
 
     // Parallel liquidity checks
+    // Note: taker_fee_bps is a percentage of quote_amount, not a fixed USDC amount,
+    // so we only check bond_amount for USDC balance requirement
     if !state.skip_fund_checks {
-        let need_usdc = bond_amount.saturating_add(fee_amount);
         let (usdc_balance, quote_balance) = tokio::try_join!(
             get_token_balance(&state.rpc, &taker, &state.usdc_mint),
             get_token_balance(&state.rpc, &taker, &quote_mint),
         )
         .map_err(|e| actix_web::error::ErrorInternalServerError(format!("RPC error: {e}")))?;
 
-        if usdc_balance < need_usdc {
+        if usdc_balance < bond_amount {
             return Ok(HttpResponse::BadRequest().json(ErrorResponse {
-            error: format!(
-                "Insufficient USDC: has {usdc_balance} needs {need_usdc} (bond {bond_amount}, fee {fee_amount})"
-            ),
-        }));
+                error: format!(
+                    "Insufficient USDC: has {usdc_balance} needs {bond_amount} (bond)"
+                ),
+            }));
         }
         if quote_balance < quote_amount {
             return Ok(HttpResponse::BadRequest().json(ErrorResponse {
@@ -196,15 +204,15 @@ async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Res
         }
     }
 
-    // Commit hash
+    // Commit hash (186 bytes total pre-image)
     let mut hasher = Sha256::new();
-    hasher.update(&salt_bytes);
-    hasher.update(rfq.as_ref());
-    hasher.update(taker.as_ref());
-    hasher.update(quote_mint.as_ref());
-    hasher.update(quote_amount.to_le_bytes());
-    hasher.update(bond_amount.to_le_bytes());
-    hasher.update(fee_amount.to_le_bytes());
+    hasher.update(&salt_bytes);                       // 64 bytes
+    hasher.update(rfq.as_ref());                      // 32 bytes
+    hasher.update(taker.as_ref());                    // 32 bytes
+    hasher.update(quote_mint.as_ref());               // 32 bytes
+    hasher.update(quote_amount.to_le_bytes());        // 8 bytes
+    hasher.update(bond_amount.to_le_bytes());         // 8 bytes
+    hasher.update(taker_fee_bps.to_le_bytes());       // 2 bytes (u16)
     let commit_hash = hasher.finalize();
 
     // Sign with solana_sdk Keypair
@@ -226,7 +234,7 @@ async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Res
         quote_mint: data.quote_mint.clone(),
         quote_amount: data.quote_amount.clone(),
         bond_amount_usdc: data.bond_amount_usdc.clone(),
-        fee_amount_usdc: data.fee_amount_usdc.clone(),
+        taker_fee_bps: data.taker_fee_bps.clone(),
         commit_hash: hex::encode(commit_hash),
         service_pubkey: service_pubkey_b58,
         liquidity_proof: hex::encode(signature.as_ref()),
