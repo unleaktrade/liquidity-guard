@@ -180,9 +180,16 @@ async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Res
         }));
     }
 
-    // Parallel liquidity checks
-    // Note: taker_fee_bps is a percentage of quote_amount, not a fixed USDC amount,
-    // so we only check bond_amount for USDC balance requirement
+    // Protocol fee uplift (ceil division so uplift >= 1 when taker_fee_bps > 0)
+    let uplift: u64 = if taker_fee_bps > 0 {
+        let numerator = quote_amount as u128 * taker_fee_bps as u128;
+        ((numerator + 9_999) / 10_000) as u64
+    } else {
+        0
+    };
+    let required_quote = quote_amount.saturating_add(uplift);
+
+    // Liquidity checks: USDC covers bond, quote token covers bid + protocol fees
     if !state.skip_fund_checks {
         let (usdc_balance, quote_balance) = tokio::try_join!(
             get_token_balance(&state.rpc, &taker, &state.usdc_mint),
@@ -197,9 +204,11 @@ async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Res
                 ),
             }));
         }
-        if quote_balance < quote_amount {
+        if quote_balance < required_quote {
             return Ok(HttpResponse::BadRequest().json(ErrorResponse {
-                error: format!("Insufficient quote: has {quote_balance} needs {quote_amount}"),
+                error: format!(
+                    "Insufficient quote: has {quote_balance} needs {required_quote} (quote {quote_amount} + fee {uplift})"
+                ),
             }));
         }
     }
