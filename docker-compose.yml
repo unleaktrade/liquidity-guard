@@ -16,9 +16,7 @@ services:
       # Mandatory for startup
       USDC_MINT: ${USDC_MINT:?must set USDC_MINT (base58 pubkey)}
       SIGNING_KEY: ${SIGNING_KEY:?must set SIGNING_KEY (base58 keypair)}
-      # Optional: local-only logging without relying on global RUST_LOG
-      # Your binary already initializes logging, so these are not required.
-      # RUST_LOG: ${RUST_LOG:-info}
+      # SKIP_FUND_CHECKS: 1
       # PORT: ${PORT:-8080}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
