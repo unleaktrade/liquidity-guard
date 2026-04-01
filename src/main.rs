@@ -180,25 +180,21 @@ async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Res
         }));
     }
 
-    // Protocol fee uplift (ceil division so uplift >= 1 when taker_fee_bps > 0)
+    // Protocol fee uplift (floor division + min 1 when taker_fee_bps > 0)
     let uplift: u64 = if taker_fee_bps > 0 {
-        let numerator = (quote_amount as u128)
+        let fee = (quote_amount as u128)
             .checked_mul(taker_fee_bps as u128)
             .ok_or_else(|| actix_web::error::ErrorBadRequest(
                 format!("Overflow computing fee: quote_amount={quote_amount} * taker_fee_bps={taker_fee_bps}")
-            ))?;
-        let ceil = numerator
-            .checked_add(9_999)
-            .ok_or_else(|| actix_web::error::ErrorBadRequest(
-                format!("Overflow in fee ceiling: numerator={numerator} + 9999")
             ))?
             .checked_div(10_000)
             .ok_or_else(|| actix_web::error::ErrorBadRequest(
                 "Unexpected division error in fee computation"
             ))?;
-        u64::try_from(ceil).map_err(|_| actix_web::error::ErrorBadRequest(
-            format!("Fee uplift {ceil} exceeds maximum u64 value")
-        ))?
+        let fee = u64::try_from(fee).map_err(|_| actix_web::error::ErrorBadRequest(
+            format!("Fee uplift {fee} exceeds maximum u64 value")
+        ))?;
+        if fee == 0 { 1 } else { fee }
     } else {
         0
     };
