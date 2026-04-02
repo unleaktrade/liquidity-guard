@@ -2,7 +2,6 @@ use actix_governor::{Governor, GovernorConfigBuilder};
 use actix_web::middleware::Logger;
 use actix_web::{web, App, HttpResponse, HttpServer, Result};
 use anyhow::Context;
-use hex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use solana_client::nonblocking::rpc_client::RpcClient;
