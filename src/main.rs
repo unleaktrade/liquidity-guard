@@ -294,6 +294,19 @@ async fn health(state: web::Data<AppState>) -> Result<HttpResponse> {
     }))
 }
 
+async fn ready(state: web::Data<AppState>) -> Result<HttpResponse> {
+    #[derive(Serialize)]
+    struct Ready {
+        status: &'static str,
+    }
+    match state.rpc.get_version().await {
+        Ok(_) => Ok(HttpResponse::Ok().json(Ready { status: "ready" })),
+        Err(e) => Ok(HttpResponse::ServiceUnavailable().json(ErrorResponse {
+            error: format!("RPC not reachable: {e}"),
+        })),
+    }
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     let filter = "info,actix_web=info,actix_http=info,actix_server=info";
@@ -340,8 +353,10 @@ async fn main() -> std::io::Result<()> {
             .wrap(Logger::new(r#"%a "%r" %s %b %Dms"#))
             .app_data(state.clone())
             .route("/health", web::get().to(health))
+            .route("/ready", web::get().to(ready))
             .route("/check", web::post().to(check))
     })
+    .shutdown_timeout(15)
     .bind(&bind)?
     .run()
     .await
