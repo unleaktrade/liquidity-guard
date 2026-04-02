@@ -17,6 +17,7 @@ services:
       USDC_MINT: ${USDC_MINT:?must set USDC_MINT (base58 pubkey)}
       SIGNING_KEY: ${SIGNING_KEY:?must set SIGNING_KEY (base58 keypair)}
       # SKIP_FUND_CHECKS: 1
+      # RATE_LIMIT: 1
       # PORT: ${PORT:-8080}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
