@@ -1,4 +1,4 @@
-use actix_governor::{Governor, GovernorConfigBuilder, PeerIpKeyExtractor};
+use actix_governor::{Governor, GovernorConfigBuilder};
 use actix_web::middleware::Logger;
 use actix_web::{web, App, HttpResponse, HttpServer, Result};
 use anyhow::Context;
