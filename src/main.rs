@@ -72,6 +72,7 @@ struct CheckResponse {
     commit_hash: String,       // hex
     liquidity_proof: String, // hex
     network: String,
+    #[serde(skip_serializing_if = "Clone::clone")]
     skip_fund_checks: bool,
     timestamp: u64,
 }
@@ -275,6 +276,7 @@ async fn health(state: web::Data<AppState>) -> Result<HttpResponse> {
         network: String,
         service_pubkey: String,
         timestamp: u64,
+        #[serde(skip_serializing_if = "Clone::clone")]
         skip_fund_checks: bool,
     }
     let ts = SystemTime::now()
