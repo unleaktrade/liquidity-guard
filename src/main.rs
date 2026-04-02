@@ -358,6 +358,13 @@ async fn main() -> std::io::Result<()> {
             // Enable access logs for this service only
             .wrap(Logger::new(r#"%a "%r" %s %b %Dms"#))
             .app_data(state.clone())
+            .app_data(
+                web::JsonConfig::default()
+                    .limit(1024)
+                    .error_handler(|err, _req| {
+                        actix_web::error::ErrorPayloadTooLarge(format!("{err}")).into()
+                    }),
+            )
             .route("/health", web::get().to(health))
             .route("/ready", web::get().to(ready))
             .route("/check", web::post().to(check))
