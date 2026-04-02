@@ -1,6 +1,9 @@
-target
-.git
+target/
+.git/
 .env
+.env.*
+*.md
+.gitignore
 Dockerfile
 docker-compose.yml
 **/*.log

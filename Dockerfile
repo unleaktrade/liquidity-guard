@@ -3,7 +3,6 @@ FROM rust:1.90-slim-bookworm AS builder
 
 # Enable faster incremental linking and cache-friendly builds
 ENV CARGO_TERM_COLOR=always \
-    RUSTFLAGS="-C target-cpu=native" \
     SQLX_OFFLINE=true
 
 WORKDIR /app
