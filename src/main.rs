@@ -85,7 +85,7 @@ struct ErrorResponse {
 struct AppState {
     rpc: Arc<RpcClient>,
     service_keypair: Arc<Keypair>,
-    network: Network,
+    network_str: String,
     usdc_mint: Pubkey,
     skip_fund_checks: bool,
 }
@@ -129,6 +129,8 @@ async fn get_token_balance(rpc: &RpcClient, owner: &Pubkey, mint: &Pubkey) -> an
 }
 
 async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Result<HttpResponse> {
+    let data = data.into_inner();
+
     // Parse keys
     let rfq = Pubkey::from_str(&data.rfq)
         .map_err(|e| actix_web::error::ErrorBadRequest(format!("Invalid rfq: {e}")))?;
@@ -154,8 +156,8 @@ async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Res
             error: format!(
                 "Invalid salt {} for taker {} and rfq {}",
                 data.salt,
-                data.taker.clone(),
-                data.rfq.clone(),
+                data.taker,
+                data.rfq,
             ),
         }));
     }
@@ -252,20 +254,20 @@ async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Res
     let usdc_mint_b58 = state.usdc_mint.to_string();
 
     Ok(HttpResponse::Ok().json(CheckResponse {
-        rfq: data.rfq.clone(),
-        salt: data.salt.clone(),
-        taker: data.taker.clone(),
+        rfq: data.rfq,
+        salt: data.salt,
+        taker: data.taker,
         usdc_mint: usdc_mint_b58,
-        quote_mint: data.quote_mint.clone(),
-        quote_amount: data.quote_amount.clone(),
-        bond_amount_usdc: data.bond_amount_usdc.clone(),
-        taker_fee_bps: data.taker_fee_bps.clone(),
+        quote_mint: data.quote_mint,
+        quote_amount: data.quote_amount,
+        bond_amount_usdc: data.bond_amount_usdc,
+        taker_fee_bps: data.taker_fee_bps,
         commit_hash: hex::encode(commit_hash),
         service_pubkey: service_pubkey_b58,
         liquidity_proof: hex::encode(signature.as_ref()),
         timestamp: ts,
         skip_fund_checks: state.skip_fund_checks,
-        network: format!("{:?}", state.network),
+        network: state.network_str.clone(),
     }))
 }
 
@@ -285,7 +287,7 @@ async fn health(state: web::Data<AppState>) -> Result<HttpResponse> {
         .as_secs();
     Ok(HttpResponse::Ok().json(Health {
         status: "healthy",
-        network: format!("{:?}", state.network),
+        network: state.network_str.clone(),
         service_pubkey: state.service_keypair.pubkey().to_string(),
         timestamp: ts,
         skip_fund_checks: state.skip_fund_checks,
@@ -324,7 +326,7 @@ async fn main() -> std::io::Result<()> {
     let state = web::Data::new(AppState {
         rpc,
         service_keypair,
-        network: network.clone(),
+        network_str: format!("{:?}", network),
         usdc_mint,
         skip_fund_checks,
     });
