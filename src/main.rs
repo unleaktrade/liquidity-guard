@@ -213,7 +213,10 @@ async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Res
             get_token_balance(&state.rpc, &taker, &state.usdc_mint),
             get_token_balance(&state.rpc, &taker, &quote_mint),
         )
-        .map_err(|e| actix_web::error::ErrorInternalServerError(format!("RPC error: {e}")))?;
+        .map_err(|e| {
+            log::error!("RPC error during liquidity check: {e}");
+            actix_web::error::ErrorInternalServerError("Internal server error")
+        })?;
 
         if usdc_balance < bond_amount {
             return Ok(HttpResponse::BadRequest().json(ErrorResponse {
@@ -301,9 +304,12 @@ async fn ready(state: web::Data<AppState>) -> Result<HttpResponse> {
     }
     match state.rpc.get_version().await {
         Ok(_) => Ok(HttpResponse::Ok().json(Ready { status: "ready" })),
-        Err(e) => Ok(HttpResponse::ServiceUnavailable().json(ErrorResponse {
-            error: format!("RPC not reachable: {e}"),
-        })),
+        Err(e) => {
+            log::error!("Readiness check failed: {e}");
+            Ok(HttpResponse::ServiceUnavailable().json(ErrorResponse {
+                error: "Service not ready".to_string(),
+            }))
+        }
     }
 }
 
