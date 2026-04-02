@@ -1,3 +1,4 @@
+use actix_governor::{Governor, GovernorConfigBuilder, PeerIpKeyExtractor};
 use actix_web::middleware::Logger;
 use actix_web::{web, App, HttpResponse, HttpServer, Result};
 use anyhow::Context;
@@ -342,6 +343,10 @@ async fn main() -> std::io::Result<()> {
         .map(|v| v.to_lowercase() == "true" || v == "1")
         .unwrap_or(false);
 
+    let rate_limit = std::env::var("RATE_LIMIT")
+        .map(|v| v.to_lowercase() == "true" || v == "1")
+        .unwrap_or(false);
+
     let state = web::Data::new(AppState {
         rpc,
         service_keypair,
@@ -353,8 +358,15 @@ async fn main() -> std::io::Result<()> {
     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".into());
     let bind = format!("0.0.0.0:{port}");
 
+    // Per-IP rate limiter: 2 req/s sustained, burst of 5
+    let governor_conf = GovernorConfigBuilder::default()
+        .seconds_per_request(2)
+        .burst_size(5)
+        .finish()
+        .expect("invalid governor config");
+
     HttpServer::new(move || {
-        App::new()
+        let mut app = App::new()
             // Enable access logs for this service only
             .wrap(Logger::new(r#"%a "%r" %s %b %Dms"#))
             .app_data(state.clone())
@@ -365,9 +377,26 @@ async fn main() -> std::io::Result<()> {
                         actix_web::error::ErrorPayloadTooLarge(format!("{err}")).into()
                     }),
             )
-            .route("/health", web::get().to(health))
-            .route("/ready", web::get().to(ready))
-            .route("/check", web::post().to(check))
+            .route("/health", web::get().to(health));
+
+        if rate_limit {
+            app = app.service(
+                    web::resource("/ready")
+                        .wrap(Governor::new(&governor_conf))
+                        .route(web::get().to(ready)),
+                )
+                .service(
+                    web::resource("/check")
+                        .wrap(Governor::new(&governor_conf))
+                        .route(web::post().to(check)),
+                );
+        } else {
+            app = app
+                .route("/ready", web::get().to(ready))
+                .route("/check", web::post().to(check));
+        }
+
+        app
     })
     .shutdown_timeout(15)
     .bind(&bind)?
