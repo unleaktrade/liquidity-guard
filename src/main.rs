@@ -4,11 +4,8 @@ use actix_web::{web, App, HttpResponse, HttpServer, Result};
 use anyhow::Context;
 use hex;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use sha2::{Digest, Sha256};
-use solana_account_decoder::{parse_account_data::ParsedAccount, UiAccountData};
 use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_client::rpc_request::TokenAccountsFilter;
 use solana_sdk::signature::Signature;
 use solana_sdk::{
     commitment_config::CommitmentConfig,
@@ -91,42 +88,51 @@ struct AppState {
     skip_fund_checks: bool,
 }
 
-// Parse amount from UiAccountData::Json -> ParsedAccount { parsed: serde_json::Value, ... }
-fn extract_amount_from_parsed(parsed: &ParsedAccount) -> Option<u64> {
-    // parsed.parsed is a serde_json::Value with shape:
-    // { "type": "account", "info": { "tokenAmount": { "amount": "123" } } }
-    let v: &Value = &parsed.parsed;
-    v.get("info")
-        .and_then(|info| info.get("tokenAmount"))
-        .and_then(|ta| ta.get("amount"))
-        .and_then(|s| s.as_str())
-        .and_then(|s| s.parse::<u64>().ok())
+/// Derive the Associated Token Account address (same logic as spl_associated_token_account).
+fn get_ata(owner: &Pubkey, mint: &Pubkey) -> Pubkey {
+    let spl_token = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
+    let ata_program =
+        Pubkey::from_str("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL").unwrap();
+    let (ata, _bump) = Pubkey::find_program_address(
+        &[owner.as_ref(), spl_token.as_ref(), mint.as_ref()],
+        &ata_program,
+    );
+    ata
 }
 
-async fn get_token_balance(rpc: &RpcClient, owner: &Pubkey, mint: &Pubkey) -> anyhow::Result<u64> {
-    // v2.3: two-arg nonblocking API; returns Vec<RpcKeyedAccount>
+/// Parse the token amount from raw SPL Token account data (offset 64, 8 bytes LE u64).
+/// Returns 0 if the account doesn't exist.
+fn parse_token_amount(account: &Option<solana_sdk::account::Account>) -> u64 {
+    match account {
+        Some(acc) if acc.data.len() >= 72 => {
+            u64::from_le_bytes(acc.data[64..72].try_into().unwrap())
+        }
+        _ => 0,
+    }
+}
+
+/// Fetch both token balances in a single RPC call.
+async fn get_token_balances(
+    rpc: &RpcClient,
+    owner: &Pubkey,
+    mint_a: &Pubkey,
+    mint_b: &Pubkey,
+) -> anyhow::Result<(u64, u64)> {
+    let ata_a = get_ata(owner, mint_a);
+    let ata_b = get_ata(owner, mint_b);
     let accounts = rpc
-        .get_token_accounts_by_owner(owner, TokenAccountsFilter::Mint(*mint))
+        .get_multiple_accounts(&[ata_a, ata_b])
         .await
         .with_context(|| {
             format!(
-                "get_token_accounts_by_owner failed (owner: {}, mint: {})",
-                owner, mint
+                "get_multiple_accounts failed (owner: {}, mints: {}, {})",
+                owner, mint_a, mint_b
             )
         })?;
-
-    let mut total: u64 = 0;
-    for keyed in accounts {
-        match keyed.account.data {
-            UiAccountData::Json(parsed) => {
-                if let Some(v) = extract_amount_from_parsed(&parsed) {
-                    total = total.saturating_add(v);
-                }
-            }
-            _ => {} // Ignore Binary/LegacyBinary
-        }
-    }
-    Ok(total)
+    Ok((
+        parse_token_amount(&accounts[0]),
+        parse_token_amount(&accounts[1]),
+    ))
 }
 
 async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Result<HttpResponse> {
@@ -210,11 +216,10 @@ async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Res
 
     // Liquidity checks: USDC covers bond, quote token covers bid + protocol fees
     if !state.skip_fund_checks {
-        let (usdc_balance, quote_balance) = tokio::try_join!(
-            get_token_balance(&state.rpc, &taker, &state.usdc_mint),
-            get_token_balance(&state.rpc, &taker, &quote_mint),
-        )
-        .map_err(|e| {
+        let (usdc_balance, quote_balance) =
+            get_token_balances(&state.rpc, &taker, &state.usdc_mint, &quote_mint)
+                .await
+                .map_err(|e| {
             log::error!("RPC error during liquidity check: {e}");
             actix_web::error::ErrorInternalServerError("Internal server error")
         })?;
