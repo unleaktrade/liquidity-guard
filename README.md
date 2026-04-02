@@ -1,10 +1,10 @@
 # Liquidity Guard
 
-A minimal REST microservice and Dockerized REST API that validates a taker’s liquidity for an OTC RFQ on Solana and returns a signed preflight proof (UUID, commit hash, ECDSA signature) for on‑chain verification.
+A minimal REST microservice and Dockerized REST API that validates a taker’s liquidity for an OTC RFQ on Solana and returns a signed preflight proof (commit hash, Ed25519 signature) for on‑chain verification.
 
 ## How it fits
 
-Use the service output in a Solana preflight instruction that verifies the hash and ECDSA signature on‑chain before running the business logic. See also:
+Use the service output in a Solana preflight instruction that verifies the hash and Ed25519 signature on‑chain before running the business logic. See also:
 
 - [experimental-preflight-sigcheck](https://github.com/unleaktrade/experimental-preflight-sigcheck)
 - [settlement-engine](https://github.com/unleaktrade/settlement-engine)
@@ -12,19 +12,19 @@ Use the service output in a Solana preflight instruction that verifies the hash 
 ## Endpoints
 
 - GET `/health`  
-  Returns service status, configured network (`devnet`, `mainnet`, `localnet`), and the ECDSA public key used to verify signatures.
+  Returns service status, configured network (`devnet`, `mainnet`, `localnet`), and the Ed25519 public key used to verify signatures.
 
 - POST `/check`  
   Validates taker liquidity for the RFQ and responds with:
-  - `uuid`: unique request identifier
-  - `commit_hash`: deterministic hash derived from `uuid` and RFQ fields
-  - `liquidity_proof`: ECDSA signature of `commit_hash` using the service key
+  - `commit_hash`: deterministic SHA-256 hash derived from RFQ fields
+  - `liquidity_proof`: Ed25519 signature of `commit_hash` using the service key
   - Echoed request context and metadata (network, timestamp, service_pubkey)
 
 Validation rules:
 
-- USDC must cover `bond_amount_usdc`
-- Quote-asset liquidity must cover `quote_amount`
+- USDC balance must cover `bond_amount_usdc`
+- Quote token balance must cover `quote_amount` + protocol fee uplift
+  - Uplift = `floor(quote_amount * taker_fee_bps / 10_000)`, minimum 1 when `taker_fee_bps > 0`
 - `taker_fee_bps` must not exceed 10,000 (100% in basis points)
 
 ### Check - Request example
@@ -74,7 +74,7 @@ Environment variables:
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `SIGNING_KEY` | **Yes** | — | Base58-encoded keypair for ECDSA signing |
+| `SIGNING_KEY` | **Yes** | — | Base58-encoded keypair for Ed25519 signing |
 | `USDC_MINT` | **Yes** | — | Base58-encoded USDC mint pubkey |
 | `SOLANA_NETWORK` | No | — | `devnet`, `mainnet`, or `localnet` |
 | `SOLANA_RPC_URL` | No | Derived from network | Solana RPC endpoint |
@@ -109,4 +109,4 @@ The on-chain verifier must construct the same buffer to validate signatures.
 
 - Keep the signing key secure and rotate as needed; clients should read the active public key from `/health`.
 - Keep `commit_hash` construction identical between the service and on-chain verifier to ensure signatures validate.
-- `taker_fee_bps` is a basis-point value (0–10,000) representing the taker fee percentage. Zero is valid for no-fee scenarios.
+- `taker_fee_bps` is a basis-point value (0–10,000) representing the taker fee percentage. When `taker_fee_bps > 0`, the protocol fee uplift is always at least 1 (floor division with minimum 1). When `taker_fee_bps = 0`, no fee is applied.
