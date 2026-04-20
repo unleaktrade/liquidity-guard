@@ -1,3 +1,4 @@
+use actix_cors::Cors;
 use actix_governor::{Governor, GovernorConfigBuilder};
 use actix_web::middleware::Logger;
 use actix_web::{web, App, HttpResponse, HttpServer, Result};
@@ -351,6 +352,18 @@ async fn main() -> std::io::Result<()> {
         .map(|v| v.to_lowercase() == "true" || v == "1")
         .unwrap_or(false);
 
+    // CORS: permissive by default (any origin/method/header). Set CORS=false to disable.
+    let cors_enabled = std::env::var("CORS")
+        .map(|v| {
+            let v = v.to_lowercase();
+            !(v == "false" || v == "0")
+        })
+        .unwrap_or(true);
+    let cors_max_age: usize = std::env::var("CORS_MAX_AGE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3600);
+
     let state = web::Data::new(AppState {
         rpc,
         service_keypair,
@@ -370,8 +383,28 @@ async fn main() -> std::io::Result<()> {
         .expect("invalid governor config");
 
     HttpServer::new(move || {
+        // Permissive CORS when enabled: any origin/method/header, wildcard response.
+        // send_wildcard() emits `Access-Control-Allow-Origin: *` instead of echoing
+        // the request Origin; no credentials are allowed (spec forbids * + creds).
+        // When disabled, Cors::default() is restrictive (blocks cross-origin), same
+        // observable behavior as not wrapping at all.
+        let cors = if cors_enabled {
+            Cors::default()
+                .allow_any_origin()
+                .allow_any_method()
+                .allow_any_header()
+                .expose_any_header()
+                .send_wildcard()
+                .max_age(cors_max_age)
+        } else {
+            Cors::default()
+        };
+
         let mut app = App::new()
-            // Enable access logs for this service only
+            // Registration order: the LAST .wrap() is outermost.
+            // CORS is inner so it short-circuits OPTIONS preflights before Governor;
+            // Logger is outer so every response (including preflights) is logged.
+            .wrap(cors)
             .wrap(Logger::new(r#"%a "%r" %s %b %Dms"#))
             .app_data(state.clone())
             .app_data(

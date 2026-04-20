@@ -79,6 +79,8 @@ Environment variables:
 | `SOLANA_NETWORK` | No | — | `devnet`, `mainnet`, or `localnet` |
 | `SOLANA_RPC_URL` | No | Derived from network | Solana RPC endpoint |
 | `SKIP_FUND_CHECKS` | No | `false` | Skip on-chain balance checks (CI/CD) |
+| `CORS` | No | `true` | Enable permissive CORS (`Access-Control-Allow-Origin: *`, any method/header, no credentials). Set to `false` or `0` to disable. |
+| `CORS_MAX_AGE` | No | `3600` | Preflight cache duration in seconds |
 | `PORT` | No | `8080` | HTTP listen port |
 
 ## Quick start
