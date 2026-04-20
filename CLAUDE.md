@@ -31,7 +31,7 @@ The `/check` flow is a linear pipeline and must stay deterministic end-to-end be
 
 Required env vars: `SIGNING_KEY` (base58 Solana keypair) and `USDC_MINT` (base58 pubkey). Both are `expect()`-ed at startup.
 
-Optional env vars: `SOLANA_NETWORK` (`devnet` default, also `mainnet`/`mainnet-beta`/`localnet`), `SOLANA_RPC_URL` (overrides the network default), `SKIP_FUND_CHECKS` (`true`/`1` skips on-chain balance reads — used for CI/CD and echoed in responses), `RATE_LIMIT` (`true`/`1` wraps `/ready` and `/check` with `actix-governor` at 2 req/s sustained, burst 5, keyed per-IP), `CORS` (default `true`; `false`/`0` disables — when on, uses `Cors::permissive()`: any origin/method/header, no allowlist), `CORS_MAX_AGE` (preflight cache seconds, default 3600), `PORT` (default 8080).
+Optional env vars: `SOLANA_NETWORK` (`devnet` default, also `mainnet`/`mainnet-beta`/`localnet`), `SOLANA_RPC_URL` (overrides the network default), `SKIP_FUND_CHECKS` (`true`/`1` skips on-chain balance reads — used for CI/CD and echoed in responses), `RATE_LIMIT` (`true`/`1` wraps `/ready` and `/check` with `actix-governor` at 2 req/s sustained, burst 5, keyed per-IP), `CORS` (default `true`; `false`/`0` disables — when on, emits wildcard `Access-Control-Allow-Origin: *` with any method/header and no credentials), `CORS_MAX_AGE` (preflight cache seconds, default 3600), `PORT` (default 8080).
 
 Middleware ordering matters: CORS is registered before Logger, which makes Logger outermost and CORS inner. Combined with the route-level Governor, OPTIONS preflights are short-circuited by CORS before reaching the rate limiter, so preflight bursts from a page load do not exhaust a client's quota.
 

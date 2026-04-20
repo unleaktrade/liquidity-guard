@@ -383,11 +383,19 @@ async fn main() -> std::io::Result<()> {
         .expect("invalid governor config");
 
     HttpServer::new(move || {
-        // Permissive CORS when enabled: any origin, method, header. No credentials.
+        // Permissive CORS when enabled: any origin/method/header, wildcard response.
+        // send_wildcard() emits `Access-Control-Allow-Origin: *` instead of echoing
+        // the request Origin; no credentials are allowed (spec forbids * + creds).
         // When disabled, Cors::default() is restrictive (blocks cross-origin), same
         // observable behavior as not wrapping at all.
         let cors = if cors_enabled {
-            Cors::permissive().max_age(cors_max_age)
+            Cors::default()
+                .allow_any_origin()
+                .allow_any_method()
+                .allow_any_header()
+                .expose_any_header()
+                .send_wildcard()
+                .max_age(cors_max_age)
         } else {
             Cors::default()
         };
