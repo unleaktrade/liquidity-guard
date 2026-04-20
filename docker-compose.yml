@@ -18,8 +18,8 @@ services:
       SIGNING_KEY: ${SIGNING_KEY:?must set SIGNING_KEY (base58 keypair)}
       # SKIP_FUND_CHECKS: 1
       # RATE_LIMIT: 1
-      # CORS: ${CORS:-true}
-      # CORS_MAX_AGE: 3600
+      # CORS: false 
+      # CORS_MAX_AGE: 77
       # PORT: ${PORT:-8080}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
