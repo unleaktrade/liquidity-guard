@@ -66,11 +66,10 @@ struct CheckResponse {
     quote_amount: String,
     bond_amount_usdc: String,
     taker_fee_bps: String,
-    service_pubkey: String,    // base58
-    commit_hash: String,       // hex
+    service_pubkey: String,  // base58
+    commit_hash: String,     // hex
     liquidity_proof: String, // hex
     network: String,
-    #[serde(skip_serializing_if = "Clone::clone")]
     skip_fund_checks: bool,
     timestamp: u64,
 }
@@ -91,8 +90,7 @@ struct AppState {
 /// Derive the Associated Token Account address (same logic as spl_associated_token_account).
 fn get_ata(owner: &Pubkey, mint: &Pubkey) -> Pubkey {
     let spl_token = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
-    let ata_program =
-        Pubkey::from_str("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL").unwrap();
+    let ata_program = Pubkey::from_str("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL").unwrap();
     let (ata, _bump) = Pubkey::find_program_address(
         &[owner.as_ref(), spl_token.as_ref(), mint.as_ref()],
         &ata_program,
@@ -158,13 +156,11 @@ async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Res
         actix_web::error::ErrorBadRequest(format!("Invalid salt format for '{}': {}", data.salt, e))
     })?;
     // Verify salt is valid signature of (taker || rfq)
-    if !salt.verify(&taker.as_ref(), &rfq.as_ref()) {
+    if !salt.verify(taker.as_ref(), rfq.as_ref()) {
         return Ok(HttpResponse::BadRequest().json(ErrorResponse {
             error: format!(
                 "Invalid salt {} for taker {} and rfq {}",
-                data.salt,
-                data.taker,
-                data.rfq,
+                data.salt, data.taker, data.rfq,
             ),
         }));
     }
@@ -184,9 +180,7 @@ async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Res
         .map_err(|e| actix_web::error::ErrorBadRequest(format!("Invalid taker_fee_bps: {e}")))?;
     if taker_fee_bps > 10_000 {
         return Ok(HttpResponse::BadRequest().json(ErrorResponse {
-            error: format!(
-                "taker_fee_bps must not exceed 10000 (100%), got {taker_fee_bps}"
-            ),
+            error: format!("taker_fee_bps must not exceed 10000 (100%), got {taker_fee_bps}"),
         }));
     }
 
@@ -201,17 +195,21 @@ async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Res
             .ok_or_else(|| actix_web::error::ErrorBadRequest(
                 "Unexpected division error in fee computation"
             ))?;
-        let fee = u64::try_from(fee).map_err(|_| actix_web::error::ErrorBadRequest(
-            format!("Fee uplift {fee} exceeds maximum u64 value")
-        ))?;
-        if fee == 0 { 1 } else { fee }
+        let fee = u64::try_from(fee).map_err(|_| {
+            actix_web::error::ErrorBadRequest(format!("Fee uplift {fee} exceeds maximum u64 value"))
+        })?;
+        if fee == 0 {
+            1
+        } else {
+            fee
+        }
     } else {
         0
     };
     let required_quote = quote_amount.checked_add(uplift).ok_or_else(|| {
-        actix_web::error::ErrorBadRequest(
-            format!("Overflow computing required quote: quote_amount={quote_amount} + uplift={uplift}")
-        )
+        actix_web::error::ErrorBadRequest(format!(
+            "Overflow computing required quote: quote_amount={quote_amount} + uplift={uplift}"
+        ))
     })?;
 
     // Liquidity checks: USDC covers bond, quote token covers bid + protocol fees
@@ -220,15 +218,13 @@ async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Res
             get_token_balances(&state.rpc, &taker, &state.usdc_mint, &quote_mint)
                 .await
                 .map_err(|e| {
-            log::error!("RPC error during liquidity check: {e}");
-            actix_web::error::ErrorInternalServerError("Internal server error")
-        })?;
+                    log::error!("RPC error during liquidity check: {e}");
+                    actix_web::error::ErrorInternalServerError("Internal server error")
+                })?;
 
         if usdc_balance < bond_amount {
             return Ok(HttpResponse::BadRequest().json(ErrorResponse {
-                error: format!(
-                    "Insufficient USDC: has {usdc_balance} needs {bond_amount} (bond)"
-                ),
+                error: format!("Insufficient USDC: has {usdc_balance} needs {bond_amount} (bond)"),
             }));
         }
         if quote_balance < required_quote {
@@ -242,13 +238,13 @@ async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Res
 
     // Commit hash (186 bytes total pre-image)
     let mut hasher = Sha256::new();
-    hasher.update(&salt_bytes);                       // 64 bytes
-    hasher.update(rfq.as_ref());                      // 32 bytes
-    hasher.update(taker.as_ref());                    // 32 bytes
-    hasher.update(quote_mint.as_ref());               // 32 bytes
-    hasher.update(quote_amount.to_le_bytes());        // 8 bytes
-    hasher.update(bond_amount.to_le_bytes());         // 8 bytes
-    hasher.update(taker_fee_bps.to_le_bytes());       // 2 bytes (u16)
+    hasher.update(salt_bytes); // 64 bytes
+    hasher.update(rfq.as_ref()); // 32 bytes
+    hasher.update(taker.as_ref()); // 32 bytes
+    hasher.update(quote_mint.as_ref()); // 32 bytes
+    hasher.update(quote_amount.to_le_bytes()); // 8 bytes
+    hasher.update(bond_amount.to_le_bytes()); // 8 bytes
+    hasher.update(taker_fee_bps.to_le_bytes()); // 2 bytes (u16)
     let commit_hash = hasher.finalize();
 
     // Sign with solana_sdk Keypair
@@ -287,7 +283,6 @@ async fn health(state: web::Data<AppState>) -> Result<HttpResponse> {
         network: String,
         service_pubkey: String,
         timestamp: u64,
-        #[serde(skip_serializing_if = "Clone::clone")]
         skip_fund_checks: bool,
     }
     let ts = SystemTime::now()
@@ -411,13 +406,14 @@ async fn main() -> std::io::Result<()> {
                 web::JsonConfig::default()
                     .limit(1024)
                     .error_handler(|err, _req| {
-                        actix_web::error::ErrorPayloadTooLarge(format!("{err}")).into()
+                        actix_web::error::ErrorPayloadTooLarge(format!("{err}"))
                     }),
             )
             .route("/health", web::get().to(health));
 
         if rate_limit {
-            app = app.service(
+            app = app
+                .service(
                     web::resource("/ready")
                         .wrap(Governor::new(&governor_conf))
                         .route(web::get().to(ready)),
