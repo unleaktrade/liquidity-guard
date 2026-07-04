@@ -236,7 +236,7 @@ async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Res
         }
     }
 
-    // Commit hash (186 bytes total pre-image)
+    // Commit hash (178 bytes total pre-image: 64+32+32+32+8+8+2)
     let mut hasher = Sha256::new();
     hasher.update(salt_bytes); // 64 bytes
     hasher.update(rfq.as_ref()); // 32 bytes
