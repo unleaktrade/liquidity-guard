@@ -16,5 +16,12 @@ tokio = { version = "1", features = ["full"] }
 # Solana crates pinned together
 solana-client = "2.3"
 solana-sdk = "2.3"
+solana-rpc-client = "2.3"
+reqwest = { version = "0.12", default-features = false }
 actix-governor = "0.10.0"
 actix-cors = "0.7"
+
+[dev-dependencies]
+actix-http = "3"
+base64 = "0.22"
+serde_json = "1.0"

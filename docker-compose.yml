@@ -16,6 +16,9 @@ services:
       # Mandatory for startup
       USDC_MINT: ${USDC_MINT:?must set USDC_MINT (base58 pubkey)}
       SIGNING_KEY: ${SIGNING_KEY:?must set SIGNING_KEY (base58 keypair)}
+      # SOLANA_RPC_FALLBACK: false
+      # SOLANA_RPC_TIMEOUT_SECS: 10
+      # SOLANA_RPC_POOL_MAX_IDLE: 32
       # SKIP_FUND_CHECKS: 1
       # RATE_LIMIT: 1
       # CORS: false 
