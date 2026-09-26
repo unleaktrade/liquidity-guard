@@ -16,7 +16,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Architecture
 
-Single-binary Rust service (`src/main.rs`) built on actix-web. One `AppState` holds a shared `SolanaRpc` (primary `RpcClient` + optional fallback `RpcClient`), the service `Keypair`, the USDC mint pubkey, network label, and the `skip_fund_checks` flag. Three routes: `GET /health` (static info + service pubkey), `GET /ready` (probes Solana RPC via `get_version`), `POST /check` (the main flow).
+Single-binary Rust service (`src/main.rs`) built on actix-web. One `AppState` holds a shared `SolanaRpc` (primary `RpcClient` + optional fallback `RpcClient`), the service `Keypair`, the USDC mint pubkey, network label, and the `skip_fund_checks` flag. Four routes: `GET /health` (static info + service pubkey), `GET /ready` (probes Solana RPC via `get_version`), `GET /metrics` (Prometheus, optional bearer token), `POST /check` (the main flow).
 
 The `/check` flow is a linear pipeline and must stay deterministic end-to-end because downstream consumers verify signatures on-chain:
 
@@ -34,12 +34,18 @@ The `/check` flow is a linear pipeline and must stay deterministic end-to-end be
 
 Env parsing is centralised in `Config::from_lookup` (tests pass a HashMap instead of touching process env). `routes()` registers the endpoints and the JSON limit and is shared by `main` and the tests; `build_cors()` builds the CORS middleware.
 
+## Observability
+
+Logging uses `tracing` (no `log`/`env_logger` in our code; `tracing-log` bridges dependency logs). `build_subscriber` builds a JSON (default) or pretty subscriber with an `EnvFilter`; tests pass an in-memory writer. `TracingLogger` opens a per-request span with a UUID `request_id`; the `log_request` middleware (inside that span) emits one `request completed` event with `request_id`, `method`, `path`, `status`, `duration_ms` and sets the `X-Request-Id` response header.
+
+Metrics: `build_metrics` returns the `actix-web-prom` middleware (namespace `liquidity_guard`, unmatched paths masked as `UNKNOWN`, `/metrics` excluded) plus `rpc_requests_total{op,target,outcome}`, registered on the same registry and incremented in `SolanaRpc::call`. `/metrics` is our own handler (`metrics_handler`), not the crate's built-in endpoint, so `METRICS_TOKEN` can protect it (constant-time compare).
+
 ## Configuration
 
 Required env vars: `SIGNING_KEY` (base58 Solana keypair) and `USDC_MINT` (base58 pubkey). Both are `expect()`-ed at startup.
 
-Optional env vars: `SOLANA_NETWORK` (`devnet` default, also `mainnet`/`mainnet-beta`/`localnet`), `SOLANA_RPC_URL` (overrides the network default), `SOLANA_RPC_FALLBACK` (default `true`; `false`/`0` disables the fallback to the network default URL), `SOLANA_RPC_TIMEOUT_SECS` (default 10), `SOLANA_RPC_POOL_MAX_IDLE` (default 32), `SKIP_FUND_CHECKS` (`true`/`1` skips on-chain balance reads — used for CI/CD and echoed in responses), `RATE_LIMIT` (`true`/`1` wraps `/ready` and `/check` with `actix-governor` at 2 req/s sustained, burst 5, keyed per-IP), `CORS` (default `true`; `false`/`0` disables — when on, emits wildcard `Access-Control-Allow-Origin: *` with any method/header and no credentials), `CORS_MAX_AGE` (preflight cache seconds, default 3600), `PORT` (default 8080).
+Optional env vars: `SOLANA_NETWORK` (`devnet` default, also `mainnet`/`mainnet-beta`/`localnet`), `SOLANA_RPC_URL` (overrides the network default), `SOLANA_RPC_FALLBACK` (default `true`; `false`/`0` disables the fallback to the network default URL), `SOLANA_RPC_TIMEOUT_SECS` (default 10), `SOLANA_RPC_POOL_MAX_IDLE` (default 32), `SKIP_FUND_CHECKS` (`true`/`1` skips on-chain balance reads — used for CI/CD and echoed in responses), `RATE_LIMIT` (`true`/`1` wraps `/ready` and `/check` with `actix-governor` at 2 req/s sustained, burst 5, keyed per-IP), `CORS` (default `true`; `false`/`0` disables — when on, emits wildcard `Access-Control-Allow-Origin: *` with any method/header and no credentials), `CORS_MAX_AGE` (preflight cache seconds, default 3600), `PORT` (default 8080), `LOG_FORMAT` (`json` default, `pretty`), `RUST_LOG` (default `info`), `METRICS_TOKEN` (optional bearer token for `/metrics`).
 
-Middleware ordering matters: CORS is registered before Logger, which makes Logger outermost and CORS inner. Combined with the route-level Governor, OPTIONS preflights are short-circuited by CORS before reaching the rate limiter, so preflight bursts from a page load do not exhaust a client's quota.
+Middleware ordering matters (last `.wrap()` is outermost): CORS → `log_request` → `TracingLogger` → Prometheus, so Prometheus times/counts everything, every response (preflights included) is logged inside a request span, and CORS stays inner. Combined with the route-level Governor, OPTIONS preflights are short-circuited by CORS before reaching the rate limiter, so preflight bursts from a page load do not exhaust a client's quota.
 
 JSON bodies are capped at 1024 bytes via `JsonConfig::limit`; oversized payloads return 413. RPC commitment level is `confirmed`.

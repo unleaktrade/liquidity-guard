@@ -24,6 +24,9 @@ services:
       # CORS: false 
       # CORS_MAX_AGE: 77
       # PORT: ${PORT:-8080}
+      # LOG_FORMAT: pretty
+      # RUST_LOG: info
+      # METRICS_TOKEN: change-me
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
       interval: 30s
