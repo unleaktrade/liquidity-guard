@@ -62,6 +62,12 @@ Validation rules:
 }
 ```
 
+## Development
+
+- Tests: `cargo test` (unit tests plus HTTP and RPC tests against an in-process mock JSON-RPC server; no network needed)
+- Lint: `cargo clippy --all-targets -- -D warnings`
+- Format: `cargo fmt`
+
 ## Docker
 
 - Build:  
@@ -78,10 +84,23 @@ Environment variables:
 | `USDC_MINT` | **Yes** | — | Base58-encoded USDC mint pubkey |
 | `SOLANA_NETWORK` | No | — | `devnet`, `mainnet`, or `localnet` |
 | `SOLANA_RPC_URL` | No | Derived from network | Solana RPC endpoint |
+| `SOLANA_RPC_FALLBACK` | No | `true` | Retry once on the network's public RPC when a custom `SOLANA_RPC_URL` fails. Set to `false` or `0` to disable. |
+| `SOLANA_RPC_TIMEOUT_SECS` | No | `10` | Per-request RPC timeout (connect timeout is `min(5, value)`) |
+| `SOLANA_RPC_POOL_MAX_IDLE` | No | `32` | Max idle keep-alive connections per RPC host |
 | `SKIP_FUND_CHECKS` | No | `false` | Skip on-chain balance checks (CI/CD) |
+| `RATE_LIMIT` | No | `false` | Per-IP rate limit on `/ready` and `/check` (2 req/s sustained, burst 5) |
 | `CORS` | No | `true` | Enable permissive CORS (`Access-Control-Allow-Origin: *`, any method/header, no credentials). Set to `false` or `0` to disable. |
 | `CORS_MAX_AGE` | No | `3600` | Preflight cache duration in seconds |
 | `PORT` | No | `8080` | HTTP listen port |
+
+## RPC resilience
+
+- Each RPC client uses an explicit request timeout (`SOLANA_RPC_TIMEOUT_SECS`) and a keep-alive connection pool (`SOLANA_RPC_POOL_MAX_IDLE`).
+- When `SOLANA_RPC_URL` is set to a custom endpoint, the network's public RPC (`api.devnet.solana.com` / `api.mainnet-beta.solana.com`) is used as a fallback: primary → one retry on the fallback → error. Every fallback is logged at `WARN`.
+- No fallback is used on `localnet`, when `SOLANA_RPC_URL` already equals the network default, or when `SOLANA_RPC_FALLBACK=false`.
+- At startup, the primary's genesis hash is compared with the one of `SOLANA_NETWORK`. On a mismatch (e.g. a mainnet URL with `SOLANA_NETWORK` left to `devnet`) the fallback is disabled and an error is logged, so balances are never read from the wrong cluster.
+- Logged RPC URLs are reduced to `scheme://host[:port]`, so provider API keys in the path or query string never reach the logs.
+- Worst case, a `/check` or `/ready` call takes about twice the timeout (20s by default). Keep that below your platform's router timeout (30s on Heroku).
 
 ## Quick start
 
@@ -92,7 +111,7 @@ Environment variables:
 
 ## Hash Pre-Image
 
-The `commit_hash` is a SHA-256 digest over a 186-byte buffer:
+The `commit_hash` is a SHA-256 digest over a 178-byte buffer:
 
 | Field          | Bytes | Type       |
 |----------------|-------|------------|
@@ -103,7 +122,7 @@ The `commit_hash` is a SHA-256 digest over a 186-byte buffer:
 | quote_amount   | 8     | u64 (LE)   |
 | bond_amount    | 8     | u64 (LE)   |
 | taker_fee_bps  | 2     | u16 (LE)   |
-| **Total**      | **186** |          |
+| **Total**      | **178** |          |
 
 The on-chain verifier must construct the same buffer to validate signatures.
 

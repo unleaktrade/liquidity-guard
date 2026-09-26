@@ -11,27 +11,34 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Docker: `docker build -t liquidity-guard .` then `docker run -p 8080:8080 --env-file .env liquidity-guard`
 - Compose: `docker compose up --build`
 
-There is no test suite in this repo; do not invent one unless asked.
+- Test: `cargo test` (all tests live in `#[cfg(test)] mod tests` in `src/main.rs`; RPC behaviour is tested against an in-process actix mock JSON-RPC server, so no network is needed). Coverage: `cargo llvm-cov --summary-only`.
+- CI (`.github/workflows/ci.yml`) runs fmt, clippy and tests on every push/PR.
 
 ## Architecture
 
-Single-binary Rust service (`src/main.rs`) built on actix-web. One `AppState` holds a shared `solana_client::nonblocking::RpcClient`, the service `Keypair`, the USDC mint pubkey, network label, and the `skip_fund_checks` flag. Three routes: `GET /health` (static info + service pubkey), `GET /ready` (probes Solana RPC via `get_version`), `POST /check` (the main flow).
+Single-binary Rust service (`src/main.rs`) built on actix-web. One `AppState` holds a shared `SolanaRpc` (primary `RpcClient` + optional fallback `RpcClient`), the service `Keypair`, the USDC mint pubkey, network label, and the `skip_fund_checks` flag. Three routes: `GET /health` (static info + service pubkey), `GET /ready` (probes Solana RPC via `get_version`), `POST /check` (the main flow).
 
 The `/check` flow is a linear pipeline and must stay deterministic end-to-end because downstream consumers verify signatures on-chain:
 
 1. Parse pubkeys (`rfq`, `taker`, `quote_mint`) and hex-decode `salt` (64 bytes → `Signature`).
 2. Verify `salt` is an Ed25519 signature of `taker` over message `rfq` — `salt.verify(taker.as_ref(), rfq.as_ref())`. Rejection here is a client bug (400), not a server error.
 3. Parse `quote_amount: u64`, `bond_amount_usdc: u64`, `taker_fee_bps: u16` (cap 10_000). Compute uplift = `floor(quote_amount * bps / 10_000)`, bumped to 1 when `bps > 0` and the floor rounds to zero. All arithmetic uses `checked_mul`/`checked_add`/`checked_div` on `u128` → `u64` with explicit error messages (see feedback memory).
-4. When `skip_fund_checks` is false, a single `get_multiple_accounts([usdc_ata, quote_ata])` RPC call fetches both balances. ATAs are derived inline via `Pubkey::find_program_address` with the SPL-Token + ATA program ids (avoids pulling `spl-associated-token-account`). Balance is parsed raw from account bytes `[64..72]` as LE u64; missing account = 0.
+4. When `skip_fund_checks` is false, a single `get_multiple_accounts([usdc_ata, quote_ata])` RPC call (through `SolanaRpc`, so it may be retried once on the fallback) fetches both balances. ATAs are derived inline via `Pubkey::find_program_address` with the SPL-Token + ATA program ids (avoids pulling `spl-associated-token-account`). Balance is parsed raw from account bytes `[64..72]` as LE u64; missing account = 0.
 5. Build the 178-byte SHA-256 pre-image in this exact order: `salt(64) || rfq(32) || taker(32) || quote_mint(32) || quote_amount_le(8) || bond_amount_le(8) || taker_fee_bps_le(2)`. Sign `commit_hash` with the service `Keypair`. Return hex-encoded hash and signature alongside echoed request fields.
 
 **Critical invariant:** the pre-image byte layout in `check()` must stay byte-identical to the on-chain verifier in `experimental-preflight-sigcheck` / `settlement-engine`. Never reorder fields, change endianness, change field widths, or alter the salt semantics without coordinating with those repos — signatures will silently fail to validate.
+
+## RPC layer
+
+`build_rpc_client` builds each `RpcClient` from a custom `reqwest::Client` (`HttpSender::new_with_client` + `RpcClient::new_sender`), with an explicit timeout, connect timeout and idle pool. `SolanaRpc::call` tries the primary, then retries once on the fallback (the network's public URL, resolved by `resolve_fallback`), logging a `WARN` when it does. `SolanaRpc::connect` runs at startup: it disables the fallback if the primary's genesis hash doesn't match `SOLANA_NETWORK` (`fallback_allowed`). RPC URLs and errors go through `redact_url`/`sanitize` before logging, because provider URLs carry API keys.
+
+Env parsing is centralised in `Config::from_lookup` (tests pass a HashMap instead of touching process env). `routes()` registers the endpoints and the JSON limit and is shared by `main` and the tests; `build_cors()` builds the CORS middleware.
 
 ## Configuration
 
 Required env vars: `SIGNING_KEY` (base58 Solana keypair) and `USDC_MINT` (base58 pubkey). Both are `expect()`-ed at startup.
 
-Optional env vars: `SOLANA_NETWORK` (`devnet` default, also `mainnet`/`mainnet-beta`/`localnet`), `SOLANA_RPC_URL` (overrides the network default), `SKIP_FUND_CHECKS` (`true`/`1` skips on-chain balance reads — used for CI/CD and echoed in responses), `RATE_LIMIT` (`true`/`1` wraps `/ready` and `/check` with `actix-governor` at 2 req/s sustained, burst 5, keyed per-IP), `CORS` (default `true`; `false`/`0` disables — when on, emits wildcard `Access-Control-Allow-Origin: *` with any method/header and no credentials), `CORS_MAX_AGE` (preflight cache seconds, default 3600), `PORT` (default 8080).
+Optional env vars: `SOLANA_NETWORK` (`devnet` default, also `mainnet`/`mainnet-beta`/`localnet`), `SOLANA_RPC_URL` (overrides the network default), `SOLANA_RPC_FALLBACK` (default `true`; `false`/`0` disables the fallback to the network default URL), `SOLANA_RPC_TIMEOUT_SECS` (default 10), `SOLANA_RPC_POOL_MAX_IDLE` (default 32), `SKIP_FUND_CHECKS` (`true`/`1` skips on-chain balance reads — used for CI/CD and echoed in responses), `RATE_LIMIT` (`true`/`1` wraps `/ready` and `/check` with `actix-governor` at 2 req/s sustained, burst 5, keyed per-IP), `CORS` (default `true`; `false`/`0` disables — when on, emits wildcard `Access-Control-Allow-Origin: *` with any method/header and no credentials), `CORS_MAX_AGE` (preflight cache seconds, default 3600), `PORT` (default 8080).
 
 Middleware ordering matters: CORS is registered before Logger, which makes Logger outermost and CORS inner. Combined with the route-level Governor, OPTIONS preflights are short-circuited by CORS before reaching the rate limiter, so preflight bursts from a page load do not exhaust a client's quota.
 
