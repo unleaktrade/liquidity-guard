@@ -1,9 +1,13 @@
 use actix_cors::Cors;
 use actix_governor::governor::middleware::NoOpMiddleware;
 use actix_governor::{Governor, GovernorConfig, GovernorConfigBuilder, PeerIpKeyExtractor};
-use actix_web::middleware::Logger;
-use actix_web::{web, App, HttpResponse, HttpServer, Result};
+use actix_web::body::MessageBody;
+use actix_web::dev::{ServiceRequest, ServiceResponse};
+use actix_web::http::header::{HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use actix_web::{web, App, HttpMessage, HttpRequest, HttpResponse, HttpServer, Result};
+use actix_web_prom::{PrometheusMetrics, PrometheusMetricsBuilder};
 use anyhow::anyhow;
+use prometheus::{Encoder, IntCounterVec, Opts, Registry, TextEncoder};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use solana_client::client_error::Result as ClientResult;
@@ -21,8 +25,12 @@ use std::{
     future::Future,
     str::FromStr,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use tracing::{error, info, warn};
+use tracing_actix_web::{RequestId, TracingLogger};
+use tracing_subscriber::fmt::MakeWriter;
+use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Clone, PartialEq)]
 enum Network {
@@ -88,6 +96,25 @@ struct Config {
     cors_enabled: bool,
     cors_max_age: usize,
     port: String,
+    log_format: LogFormat,
+    metrics_token: Option<String>,
+}
+
+/// Log output format: JSON lines (default, for log aggregation) or
+/// human-readable (`LOG_FORMAT=pretty`, for local development).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum LogFormat {
+    Json,
+    Pretty,
+}
+
+impl LogFormat {
+    fn parse(value: Option<&str>) -> Self {
+        match value.map(|v| v.trim().to_lowercase()).as_deref() {
+            Some("pretty") | Some("text") => LogFormat::Pretty,
+            _ => LogFormat::Json,
+        }
+    }
 }
 
 /// `true`/`1` (case-insensitive) enables; anything else, or unset, disables.
@@ -118,7 +145,7 @@ where
         Some(raw) => match raw.trim().parse::<T>() {
             Ok(v) if v != T::default() => v,
             _ => {
-                log::warn!("Invalid {name}={raw:?}, using default {default}");
+                warn!("Invalid {name}={raw:?}, using default {default}");
                 default
             }
         },
@@ -176,6 +203,10 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(3600),
             port: get("PORT").unwrap_or_else(|| "8080".into()),
+            log_format: LogFormat::parse(get("LOG_FORMAT").as_deref()),
+            metrics_token: get("METRICS_TOKEN")
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty()),
         }
     }
 }
@@ -236,14 +267,14 @@ fn fallback_allowed(network: &Network, primary_genesis: Result<Hash, String>) ->
     match primary_genesis {
         Ok(hash) if hash.to_string() == expected => true,
         Ok(hash) => {
-            log::error!(
+            error!(
                 "SOLANA_RPC_URL genesis hash {hash} does not match {network:?} ({expected}); \
                  RPC fallback disabled. Check SOLANA_NETWORK."
             );
             false
         }
         Err(e) => {
-            log::warn!(
+            warn!(
                 "Could not verify SOLANA_RPC_URL genesis hash ({e}); keeping RPC fallback enabled"
             );
             true
@@ -256,6 +287,8 @@ struct SolanaRpc {
     primary: RpcClient,
     primary_url: String,
     fallback: Option<(RpcClient, String)>,
+    /// `rpc_requests_total{op, target, outcome}`, when metrics are enabled.
+    metrics: Option<IntCounterVec>,
 }
 
 impl SolanaRpc {
@@ -264,6 +297,19 @@ impl SolanaRpc {
             primary: build_rpc_client(primary_url, settings),
             primary_url: primary_url.to_string(),
             fallback: fallback_url.map(|u| (build_rpc_client(u, settings), u.to_string())),
+            metrics: None,
+        }
+    }
+
+    fn with_metrics(mut self, counter: IntCounterVec) -> Self {
+        self.metrics = Some(counter);
+        self
+    }
+
+    fn record(&self, op: &str, target: &str, ok: bool) {
+        if let Some(m) = &self.metrics {
+            m.with_label_values(&[op, target, if ok { "ok" } else { "error" }])
+                .inc();
         }
     }
 
@@ -283,7 +329,7 @@ impl SolanaRpc {
                 .await
                 .map_err(|e| sanitize(&e.to_string(), &rpc.primary_url));
             if fallback_allowed(network, genesis) {
-                log::info!(
+                info!(
                     "RPC primary {} with fallback {}",
                     redact_url(&rpc.primary_url),
                     redact_url(fb_url)
@@ -301,26 +347,39 @@ impl SolanaRpc {
         Fut: Future<Output = ClientResult<T>>,
     {
         let primary_err = match f(&self.primary).await {
-            Ok(v) => return Ok(v),
-            Err(e) => sanitize(&e.to_string(), &self.primary_url),
+            Ok(v) => {
+                self.record(op, "primary", true);
+                return Ok(v);
+            }
+            Err(e) => {
+                self.record(op, "primary", false);
+                sanitize(&e.to_string(), &self.primary_url)
+            }
         };
         let primary = redact_url(&self.primary_url);
         let Some((fallback, fb_url)) = &self.fallback else {
             return Err(anyhow!("{op} failed on {primary}: {primary_err}"));
         };
         let fb = redact_url(fb_url);
-        log::warn!(
+        warn!(
+            op,
+            primary = %primary,
+            fallback = %fb,
             "RPC primary {primary} failed for {op}: {primary_err}; retrying on fallback {fb}"
         );
         match f(fallback).await {
             Ok(v) => {
-                log::info!("{op} served by fallback RPC {fb}");
+                self.record(op, "fallback", true);
+                info!(op, fallback = %fb, "{op} served by fallback RPC {fb}");
                 Ok(v)
             }
-            Err(e) => Err(anyhow!(
-                "{op} failed on primary {primary} ({primary_err}) and fallback {fb} ({})",
-                sanitize(&e.to_string(), fb_url)
-            )),
+            Err(e) => {
+                self.record(op, "fallback", false);
+                Err(anyhow!(
+                    "{op} failed on primary {primary} ({primary_err}) and fallback {fb} ({})",
+                    sanitize(&e.to_string(), fb_url)
+                ))
+            }
         }
     }
 
@@ -545,7 +604,7 @@ async fn check(data: web::Json<CheckRequest>, state: web::Data<AppState>) -> Res
             get_token_balances(&state.rpc, &taker, &state.usdc_mint, &quote_mint)
                 .await
                 .map_err(|e| {
-                    log::error!("RPC error during liquidity check: {e}");
+                    error!("RPC error during liquidity check: {e}");
                     actix_web::error::ErrorInternalServerError("Internal server error")
                 })?;
 
@@ -625,7 +684,7 @@ async fn ready(state: web::Data<AppState>) -> Result<HttpResponse> {
     match state.rpc.get_version().await {
         Ok(()) => Ok(HttpResponse::Ok().json(Ready { status: "ready" })),
         Err(e) => {
-            log::error!("Readiness check failed: {e}");
+            error!("Readiness check failed: {e}");
             Ok(HttpResponse::ServiceUnavailable().json(ErrorResponse {
                 error: "Service not ready".to_string(),
             }))
@@ -652,7 +711,8 @@ fn routes(cfg: &mut web::ServiceConfig, governor: Option<&RateLimitConfig>) {
             .limit(1024)
             .error_handler(|err, _req| actix_web::error::ErrorPayloadTooLarge(format!("{err}"))),
     )
-    .route("/health", web::get().to(health));
+    .route("/health", web::get().to(health))
+    .route("/metrics", web::get().to(metrics_handler));
 
     match governor {
         Some(conf) => {
@@ -693,15 +753,187 @@ fn build_cors(enabled: bool, max_age: usize) -> Cors {
     }
 }
 
+/// Histogram buckets (seconds) for HTTP latency: from cached/static answers
+/// up to the worst-case RPC path (primary timeout + fallback timeout).
+const LATENCY_BUCKETS: &[f64] = &[
+    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 20.0, 30.0,
+];
+
+/// Prometheus middleware (request count + latency histogram by endpoint,
+/// method and status) and the RPC counter, sharing one registry.
+///
+/// `/metrics` is served by our own handler (see `metrics_handler`) so it can
+/// be token-protected, and is excluded from the HTTP metrics. Unmatched paths
+/// are recorded as `UNKNOWN` to keep label cardinality bounded.
+fn build_metrics() -> (PrometheusMetrics, IntCounterVec) {
+    let prometheus = PrometheusMetricsBuilder::new("liquidity_guard")
+        .registry(Registry::new())
+        .buckets(LATENCY_BUCKETS)
+        .exclude("/metrics")
+        .mask_unmatched_patterns("UNKNOWN")
+        .build()
+        .expect("failed to build Prometheus metrics");
+    let rpc_requests = IntCounterVec::new(
+        Opts::new(
+            "rpc_requests_total",
+            "Solana RPC calls by operation, target (primary/fallback) and outcome",
+        )
+        .namespace("liquidity_guard"),
+        &["op", "target", "outcome"],
+    )
+    .expect("invalid rpc_requests_total metric");
+    // Pre-create every series at 0 so dashboards and rate() see them before
+    // the first failure.
+    for op in ["get_multiple_accounts", "get_version"] {
+        for target in ["primary", "fallback"] {
+            for outcome in ["ok", "error"] {
+                rpc_requests.with_label_values(&[op, target, outcome]);
+            }
+        }
+    }
+    prometheus
+        .registry
+        .register(Box::new(rpc_requests.clone()))
+        .expect("failed to register rpc_requests_total");
+    (prometheus, rpc_requests)
+}
+
+/// Registry exposed on `/metrics`, with the optional bearer token.
+#[derive(Clone)]
+struct MetricsState {
+    registry: Registry,
+    token: Option<String>,
+}
+
+/// Constant-time byte comparison, so the token check does not leak a prefix
+/// match through timing.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+fn authorized(req: &HttpRequest, token: Option<&str>) -> bool {
+    let Some(expected) = token else {
+        return true;
+    };
+    req.headers()
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .is_some_and(|given| constant_time_eq(given.trim().as_bytes(), expected.as_bytes()))
+}
+
+async fn metrics_handler(req: HttpRequest, state: web::Data<MetricsState>) -> HttpResponse {
+    if !authorized(&req, state.token.as_deref()) {
+        return HttpResponse::Unauthorized()
+            .insert_header(("WWW-Authenticate", "Bearer"))
+            .json(ErrorResponse {
+                error: "Unauthorized".to_string(),
+            });
+    }
+    let encoder = TextEncoder::new();
+    let mut buffer = Vec::new();
+    if let Err(e) = encoder.encode(&state.registry.gather(), &mut buffer) {
+        error!("Failed to encode metrics: {e}");
+        return HttpResponse::InternalServerError().finish();
+    }
+    HttpResponse::Ok()
+        .insert_header((CONTENT_TYPE, encoder.format_type()))
+        .body(buffer)
+}
+
+/// Build the global subscriber: `RUST_LOG`-style filter (default `info`) and
+/// JSON lines or pretty output, written to `writer`.
+fn build_subscriber<W>(
+    format: LogFormat,
+    filter: &str,
+    writer: W,
+) -> Box<dyn tracing::Subscriber + Send + Sync>
+where
+    W: for<'a> MakeWriter<'a> + Send + Sync + 'static,
+{
+    let filter = EnvFilter::try_new(filter).unwrap_or_else(|_| EnvFilter::new("info"));
+    let builder = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_ansi(false)
+        .with_writer(writer);
+    match format {
+        LogFormat::Json => Box::new(
+            builder
+                .json()
+                .flatten_event(true)
+                .with_current_span(true)
+                .with_span_list(false)
+                .finish(),
+        ),
+        LogFormat::Pretty => Box::new(builder.finish()),
+    }
+}
+
+static X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
+
+/// Runs inside the `TracingLogger` span: emits one structured line per
+/// request (request id, method, path, status, duration) and returns the
+/// request id to the client in `X-Request-Id`.
+async fn log_request(
+    req: ServiceRequest,
+    next: actix_web::middleware::Next<impl MessageBody + 'static>,
+) -> Result<ServiceResponse<impl MessageBody>, actix_web::Error> {
+    let started = Instant::now();
+    let method = req.method().to_string();
+    let path = req.path().to_string();
+    let request_id = req.extensions().get::<RequestId>().map(|id| id.to_string());
+    let outcome = next.call(req).await;
+    let duration_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let status = match &outcome {
+        Ok(res) => res.status().as_u16(),
+        Err(e) => e.as_response_error().status_code().as_u16(),
+    };
+    let rid = request_id.as_deref().unwrap_or("");
+    if status >= 500 {
+        error!(
+            request_id = rid,
+            method, path, status, duration_ms, "request completed"
+        );
+    } else if status >= 400 {
+        warn!(
+            request_id = rid,
+            method, path, status, duration_ms, "request completed"
+        );
+    } else {
+        info!(
+            request_id = rid,
+            method, path, status, duration_ms, "request completed"
+        );
+    }
+    let mut res = outcome?;
+    if let Some(value) = request_id.and_then(|id| HeaderValue::from_str(&id).ok()) {
+        res.headers_mut().insert(X_REQUEST_ID.clone(), value);
+    }
+    Ok(res)
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    let filter = "info,actix_web=info,actix_http=info,actix_server=info";
-    env_logger::Builder::from_env(env_logger::Env::default())
-        .filter_level(log::LevelFilter::Info)
-        .parse_filters(filter)
-        .init();
-
     let config = Config::from_lookup(|k| std::env::var(k).ok());
+
+    // Also bridges `log` records from dependencies (actix, solana, reqwest).
+    use tracing_subscriber::util::SubscriberInitExt;
+    build_subscriber(
+        config.log_format,
+        &std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
+        std::io::stdout,
+    )
+    .try_init()
+    .expect("failed to install tracing subscriber");
+
+    let (prometheus, rpc_requests) = build_metrics();
+    let metrics_state = web::Data::new(MetricsState {
+        registry: prometheus.registry.clone(),
+        token: config.metrics_token.clone(),
+    });
+    if config.metrics_token.is_none() {
+        warn!("METRICS_TOKEN is not set: /metrics is publicly readable");
+    }
 
     // SIGNING_KEY is base58 keypair string
     let keypair_b58 =
@@ -720,7 +952,8 @@ async fn main() -> std::io::Result<()> {
             config.fallback_url.as_deref(),
             &config.rpc,
         )
-        .await,
+        .await
+        .with_metrics(rpc_requests),
     );
 
     let state = web::Data::new(AppState {
@@ -744,10 +977,15 @@ async fn main() -> std::io::Result<()> {
         App::new()
             // Registration order: the LAST .wrap() is outermost.
             // CORS is inner so it short-circuits OPTIONS preflights before Governor;
-            // Logger is outer so every response (including preflights) is logged.
+            // the request logger and TracingLogger (request id span) sit outside it
+            // so every response, preflights included, is logged; Prometheus is
+            // outermost so it times and counts everything.
             .wrap(cors)
-            .wrap(Logger::new(r#"%a "%r" %s %b %Dms"#))
+            .wrap(actix_web::middleware::from_fn(log_request))
+            .wrap(TracingLogger::default())
+            .wrap(prometheus.clone())
             .app_data(state.clone())
+            .app_data(metrics_state.clone())
             .configure(|cfg| routes(cfg, governor_conf.as_ref()))
     })
     .shutdown_timeout(15)
@@ -1111,6 +1349,8 @@ mod tests {
                 cors_enabled: true,
                 cors_max_age: 3600,
                 port: "8080".into(),
+                log_format: LogFormat::Json,
+                metrics_token: None,
             }
         );
         assert_eq!(c.rpc.timeout, Duration::from_secs(10));
@@ -1738,5 +1978,405 @@ mod tests {
             .to_request();
         let resp = atest::call_service(&app, req).await;
         assert!(resp.headers().get("access-control-allow-origin").is_none());
+    }
+
+    // ---------- observability ----------
+
+    #[test]
+    fn log_format_and_metrics_token_config() {
+        assert_eq!(LogFormat::parse(None), LogFormat::Json);
+        assert_eq!(LogFormat::parse(Some("json")), LogFormat::Json);
+        assert_eq!(LogFormat::parse(Some(" Pretty ")), LogFormat::Pretty);
+        assert_eq!(LogFormat::parse(Some("text")), LogFormat::Pretty);
+        assert_eq!(LogFormat::parse(Some("xml")), LogFormat::Json);
+        let c = config(&[("LOG_FORMAT", "pretty"), ("METRICS_TOKEN", " s3cret ")]);
+        assert_eq!(c.log_format, LogFormat::Pretty);
+        assert_eq!(c.metrics_token.as_deref(), Some("s3cret"));
+        assert_eq!(config(&[("METRICS_TOKEN", "  ")]).metrics_token, None);
+    }
+
+    #[test]
+    fn constant_time_eq_semantics() {
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"ab"));
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    /// Shared in-memory log sink for `MakeWriter`.
+    #[derive(Clone, Default)]
+    struct LogBuf(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogBuf {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for LogBuf {
+        type Writer = LogBuf;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    impl LogBuf {
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+        fn json_lines(&self) -> Vec<Value> {
+            self.text()
+                .lines()
+                .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l}")))
+                .collect()
+        }
+    }
+
+    struct Observed {
+        metrics: web::Data<MetricsState>,
+        prometheus: PrometheusMetrics,
+        rpc_requests: IntCounterVec,
+    }
+
+    fn observed(token: Option<&str>) -> Observed {
+        let (prometheus, rpc_requests) = build_metrics();
+        Observed {
+            metrics: web::Data::new(MetricsState {
+                registry: prometheus.registry.clone(),
+                token: token.map(String::from),
+            }),
+            prometheus,
+            rpc_requests,
+        }
+    }
+
+    /// Full middleware stack as in `main`.
+    macro_rules! full_app {
+        ($state:expr, $obs:expr, $gov:expr) => {
+            atest::init_service(
+                App::new()
+                    .wrap(build_cors(true, 3600))
+                    .wrap(actix_web::middleware::from_fn(log_request))
+                    .wrap(TracingLogger::default())
+                    .wrap($obs.prometheus.clone())
+                    .app_data($state.clone())
+                    .app_data($obs.metrics.clone())
+                    .configure(|cfg| routes(cfg, $gov)),
+            )
+            .await
+        };
+    }
+
+    async fn scrape<B: actix_web::body::MessageBody>(
+        app: &impl actix_web::dev::Service<
+            actix_http::Request,
+            Response = actix_web::dev::ServiceResponse<B>,
+            Error = actix_web::Error,
+        >,
+        auth: Option<&str>,
+    ) -> (StatusCode, String) {
+        let mut req = atest::TestRequest::get().uri("/metrics");
+        if let Some(a) = auth {
+            req = req.insert_header((AUTHORIZATION, a));
+        }
+        let resp = atest::call_service(app, req.to_request()).await;
+        let status = resp.status();
+        let body = atest::read_body(resp).await;
+        (status, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    fn metric_value(body: &str, prefix: &str) -> Option<f64> {
+        body.lines()
+            .find(|l| l.starts_with(prefix))
+            .and_then(|l| l.rsplit(' ').next())
+            .and_then(|v| v.parse().ok())
+    }
+
+    #[actix_web::test]
+    async fn metrics_count_requests_by_endpoint_method_status() {
+        let fx = Fixture::new();
+        let obs = observed(None);
+        let state = fx.state(SolanaRpc::new(&dead_url(), None, &fast_settings()), true);
+        let app = full_app!(state, obs, None);
+
+        let (s, _) = post_check(&app, &fx.body(1_000, 1, "50")).await;
+        assert_eq!(s, StatusCode::OK);
+        let (s, _) = post_check(&app, &fx.body(1_000, 1, "20000")).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        for _ in 0..2 {
+            let req = atest::TestRequest::get().uri("/health").to_request();
+            atest::call_service(&app, req).await;
+        }
+        let req = atest::TestRequest::get()
+            .uri("/wp-admin/x.php")
+            .to_request();
+        assert_eq!(
+            atest::call_service(&app, req).await.status(),
+            StatusCode::NOT_FOUND
+        );
+
+        let (status, body) = scrape(&app, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let total = "liquidity_guard_http_requests_total";
+        assert_eq!(
+            metric_value(
+                &body,
+                &format!(r#"{total}{{endpoint="/check",method="POST",status="200"}}"#)
+            ),
+            Some(1.0),
+            "{body}"
+        );
+        assert_eq!(
+            metric_value(
+                &body,
+                &format!(r#"{total}{{endpoint="/check",method="POST",status="400"}}"#)
+            ),
+            Some(1.0)
+        );
+        assert_eq!(
+            metric_value(
+                &body,
+                &format!(r#"{total}{{endpoint="/health",method="GET",status="200"}}"#)
+            ),
+            Some(2.0)
+        );
+        // Unmatched paths are masked, never recorded verbatim.
+        assert_eq!(
+            metric_value(
+                &body,
+                &format!(r#"{total}{{endpoint="UNKNOWN",method="GET",status="404"}}"#)
+            ),
+            Some(1.0)
+        );
+        assert!(!body.contains("wp-admin"));
+        // Latency histogram with our buckets.
+        let hist = "liquidity_guard_http_requests_duration_seconds";
+        assert!(body.contains(&format!(
+            r#"{hist}_bucket{{endpoint="/check",method="POST",status="200",le="0.005"}}"#
+        )));
+        assert!(body.contains(&format!(
+            r#"{hist}_bucket{{endpoint="/check",method="POST",status="200",le="30"}}"#
+        )));
+        assert_eq!(
+            metric_value(
+                &body,
+                &format!(r#"{hist}_count{{endpoint="/check",method="POST",status="200"}}"#)
+            ),
+            Some(1.0)
+        );
+        // /metrics does not count itself.
+        let (_, body) = scrape(&app, None).await;
+        assert!(!body.contains(r#"endpoint="/metrics""#), "{body}");
+        assert!(body.contains("# TYPE liquidity_guard_rpc_requests_total counter"));
+        assert_eq!(
+            metric_value(
+                &body,
+                r#"liquidity_guard_rpc_requests_total{op="get_version",outcome="error",target="fallback"}"#
+            ),
+            Some(0.0),
+            "series are pre-created at 0"
+        );
+    }
+
+    #[actix_web::test]
+    async fn metrics_record_rate_limit_and_server_errors() {
+        let fx = Fixture::new();
+        let obs = observed(None);
+        let state = fx.state(SolanaRpc::new(&dead_url(), None, &fast_settings()), false);
+        let gov = rate_limit_config();
+        let app = full_app!(state, obs, Some(&gov));
+        let body = fx.body(1, 1, "0");
+        for _ in 0..6 {
+            post_check(&app, &body).await;
+        }
+        let (_, metrics) = scrape(&app, None).await;
+        let total = "liquidity_guard_http_requests_total";
+        assert_eq!(
+            metric_value(
+                &metrics,
+                &format!(r#"{total}{{endpoint="/check",method="POST",status="500"}}"#)
+            ),
+            Some(5.0),
+            "{metrics}"
+        );
+        assert_eq!(
+            metric_value(
+                &metrics,
+                &format!(r#"{total}{{endpoint="/check",method="POST",status="429"}}"#)
+            ),
+            Some(1.0)
+        );
+    }
+
+    #[actix_web::test]
+    async fn metrics_token_protects_endpoint() {
+        let fx = Fixture::new();
+        let obs = observed(Some("s3cret"));
+        let state = fx.state(SolanaRpc::new(&dead_url(), None, &fast_settings()), true);
+        let app = full_app!(state, obs, None);
+        for auth in [
+            None,
+            Some("Bearer wrong"),
+            Some("s3cret"),
+            Some("Basic s3cret"),
+            Some("Bearer s3cre"),
+        ] {
+            let (status, body) = scrape(&app, auth).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{auth:?}");
+            assert!(
+                !body.contains("liquidity_guard_"),
+                "{auth:?} leaked metrics"
+            );
+        }
+        let (status, body) = scrape(&app, Some("Bearer s3cret")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("liquidity_guard_rpc_requests_total"));
+        // The endpoint is not rate limited, even with the governor on.
+        let gov = rate_limit_config();
+        let app = full_app!(state, obs, Some(&gov));
+        for _ in 0..10 {
+            assert_eq!(scrape(&app, Some("Bearer s3cret")).await.0, StatusCode::OK);
+        }
+    }
+
+    #[actix_web::test]
+    async fn rpc_counter_tracks_primary_and_fallback() {
+        let (p, f) = (Mock::new(Mode::Ok), Mock::new(Mode::Ok));
+        let obs = observed(None);
+        let (pu, fu) = (start_mock(p.clone()), start_mock(f.clone()));
+        let rpc =
+            SolanaRpc::new(&pu, Some(&fu), &fast_settings()).with_metrics(obs.rpc_requests.clone());
+        let c = |op: &str, target: &str, outcome: &str| {
+            obs.rpc_requests
+                .with_label_values(&[op, target, outcome])
+                .get()
+        };
+        rpc.get_version().await.unwrap();
+        assert_eq!(c("get_version", "primary", "ok"), 1);
+
+        *p.mode.lock().unwrap() = Mode::Status(500);
+        rpc.get_multiple_accounts(&[Pubkey::new_unique()])
+            .await
+            .unwrap();
+        assert_eq!(c("get_multiple_accounts", "primary", "error"), 1);
+        assert_eq!(c("get_multiple_accounts", "fallback", "ok"), 1);
+
+        *f.mode.lock().unwrap() = Mode::Status(500);
+        rpc.get_version().await.unwrap_err();
+        assert_eq!(c("get_version", "primary", "error"), 1);
+        assert_eq!(c("get_version", "fallback", "error"), 1);
+    }
+
+    #[actix_web::test]
+    async fn json_logs_carry_request_fields_and_request_id_header() {
+        let buf = LogBuf::default();
+        let _guard = tracing::subscriber::set_default(build_subscriber(
+            LogFormat::Json,
+            "info",
+            buf.clone(),
+        ));
+        let fx = Fixture::new();
+        let obs = observed(None);
+        let state = fx.state(SolanaRpc::new(&dead_url(), None, &fast_settings()), true);
+        let app = full_app!(state, obs, None);
+
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            let req = atest::TestRequest::get().uri("/health?x=1").to_request();
+            let resp = atest::call_service(&app, req).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            ids.push(
+                resp.headers()
+                    .get("x-request-id")
+                    .expect("x-request-id header")
+                    .to_str()
+                    .unwrap()
+                    .to_string(),
+            );
+        }
+        assert_ne!(ids[0], ids[1], "request ids must be unique");
+        let (s, _) = post_check(&app, &fx.body(1, 1, "20000")).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+
+        let lines = buf.json_lines();
+        let done: Vec<&Value> = lines
+            .iter()
+            .filter(|l| l["message"] == "request completed")
+            .collect();
+        assert_eq!(done.len(), 3, "{}", buf.text());
+        for (line, id) in done.iter().zip(&ids) {
+            assert_eq!(line["request_id"], id.as_str());
+            assert_eq!(line["method"], "GET");
+            assert_eq!(line["path"], "/health");
+            assert_eq!(line["status"], 200);
+            assert_eq!(line["level"], "INFO");
+            assert!(line["duration_ms"].as_f64().unwrap() >= 0.0);
+            assert!(line["timestamp"].is_string());
+            // Root span from TracingLogger carries the same request id.
+            assert_eq!(line["span"]["request_id"], id.as_str());
+        }
+        assert_eq!(done[2]["status"], 400);
+        assert_eq!(done[2]["level"], "WARN");
+        assert_eq!(done[2]["path"], "/check");
+    }
+
+    #[actix_web::test]
+    async fn json_logs_server_errors_and_fallback_warning_are_redacted() {
+        let buf = LogBuf::default();
+        let _guard = tracing::subscriber::set_default(build_subscriber(
+            LogFormat::Json,
+            "info",
+            buf.clone(),
+        ));
+        let fx = Fixture::new();
+        let obs = observed(None);
+        let primary = format!("{}/SECRET/?api-key=SECRET", dead_url());
+        let rpc = SolanaRpc::new(&primary, Some(&dead_url()), &fast_settings());
+        let state = fx.state(rpc, false);
+        let app = full_app!(state, obs, None);
+        let (s, _) = post_check(&app, &fx.body(1, 1, "0")).await;
+        assert_eq!(s, StatusCode::INTERNAL_SERVER_ERROR);
+
+        let text = buf.text();
+        assert!(!text.contains("SECRET"), "{text}");
+        let lines = buf.json_lines();
+        let fallback = lines
+            .iter()
+            .find(|l| l["op"] == "get_multiple_accounts" && l["level"] == "WARN")
+            .unwrap_or_else(|| panic!("no fallback warning in {text}"));
+        assert!(fallback["message"]
+            .as_str()
+            .unwrap()
+            .contains("retrying on fallback"));
+        // Events inside a request inherit its request id through the span.
+        assert!(fallback["span"]["request_id"].is_string());
+        let done = lines
+            .iter()
+            .find(|l| l["message"] == "request completed")
+            .unwrap();
+        assert_eq!(done["status"], 500);
+        assert_eq!(done["level"], "ERROR");
+    }
+
+    #[test]
+    fn pretty_logs_and_filter_fallback() {
+        let buf = LogBuf::default();
+        // An invalid filter falls back to `info`.
+        let sub = build_subscriber(LogFormat::Pretty, "=[bad", buf.clone());
+        tracing::subscriber::with_default(sub, || {
+            info!(answer = 42, "hello pretty");
+            tracing::debug!("hidden at info");
+        });
+        let text = buf.text();
+        assert!(
+            text.contains("hello pretty") && text.contains("answer=42"),
+            "{text}"
+        );
+        assert!(!text.contains("hidden at info"));
+        assert!(serde_json::from_str::<Value>(text.lines().next().unwrap()).is_err());
     }
 }

@@ -14,6 +14,9 @@ Use the service output in a Solana preflight instruction that verifies the hash 
 - GET `/health`  
   Returns service status, configured network (`devnet`, `mainnet`, `localnet`), and the Ed25519 public key used to verify signatures.
 
+- GET `/metrics`  
+  Prometheus metrics (text format). Protected by `METRICS_TOKEN` when set.
+
 - POST `/check`  
   Validates taker liquidity for the RFQ and responds with:
   - `commit_hash`: deterministic SHA-256 hash derived from RFQ fields
@@ -92,6 +95,9 @@ Environment variables:
 | `CORS` | No | `true` | Enable permissive CORS (`Access-Control-Allow-Origin: *`, any method/header, no credentials). Set to `false` or `0` to disable. |
 | `CORS_MAX_AGE` | No | `3600` | Preflight cache duration in seconds |
 | `PORT` | No | `8080` | HTTP listen port |
+| `LOG_FORMAT` | No | `json` | `json` (one JSON object per line) or `pretty` (human-readable, for local dev) |
+| `RUST_LOG` | No | `info` | Log filter, e.g. `info,liquidity_guard=debug` |
+| `METRICS_TOKEN` | No | — | When set, `GET /metrics` requires `Authorization: Bearer <token>`; when unset, `/metrics` is open |
 
 ## RPC resilience
 
@@ -101,6 +107,22 @@ Environment variables:
 - At startup, the primary's genesis hash is compared with the one of `SOLANA_NETWORK`. On a mismatch (e.g. a mainnet URL with `SOLANA_NETWORK` left to `devnet`) the fallback is disabled and an error is logged, so balances are never read from the wrong cluster.
 - Logged RPC URLs are reduced to `scheme://host[:port]`, so provider API keys in the path or query string never reach the logs.
 - Worst case, a `/check` or `/ready` call takes about twice the timeout (20s by default). Keep that below your platform's router timeout (30s on Heroku).
+
+## Observability
+
+**Metrics** (`GET /metrics`, Prometheus text format):
+
+| Metric | Type | Labels |
+|---|---|---|
+| `liquidity_guard_http_requests_total` | counter | `endpoint`, `method`, `status` |
+| `liquidity_guard_http_requests_duration_seconds` | histogram (5ms → 30s buckets) | `endpoint`, `method`, `status` |
+| `liquidity_guard_rpc_requests_total` | counter | `op`, `target` (`primary`/`fallback`), `outcome` (`ok`/`error`) |
+
+- `endpoint` is the route pattern; unknown paths are recorded as `UNKNOWN` to keep label cardinality bounded. `/metrics` itself is not counted and is not rate limited.
+- Error rate: `sum(rate(liquidity_guard_http_requests_total{status=~"5.."}[5m])) / sum(rate(liquidity_guard_http_requests_total[5m]))`
+- RPC fallback rate: `sum(rate(liquidity_guard_rpc_requests_total{target="fallback"}[5m]))`
+
+**Logs** are structured with `tracing` and written as JSON lines to stdout by default (`LOG_FORMAT=pretty` for local dev). Every request emits one `request completed` line with `request_id`, `method`, `path`, `status` and `duration_ms` (level `INFO`, `WARN` for 4xx, `ERROR` for 5xx). Other events during a request (e.g. an RPC fallback) carry the same `request_id` under `span`. The id is returned to clients in the `X-Request-Id` response header, so client-side errors can be matched with server logs.
 
 ## Quick start
 
