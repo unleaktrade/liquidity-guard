@@ -102,10 +102,11 @@ struct Config {
 }
 
 /// Shared-secret API keys accepted on `/check` (and `/metrics`). Empty means
-/// authentication is disabled. `Debug` never prints the keys, since `Config`
-/// is `Debug`.
+/// authentication is disabled. Only the SHA-256 digest of each key is kept:
+/// the plaintext never stays in memory or reaches `Debug` output, and a
+/// request costs one hash whatever the number of keys.
 #[derive(Clone, Default, PartialEq)]
-struct ApiKeys(Vec<String>);
+struct ApiKeys(Vec<[u8; 32]>);
 
 impl std::fmt::Debug for ApiKeys {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -117,19 +118,24 @@ impl ApiKeys {
     /// Merge `API_KEYS` (comma-separated) and `API_KEY` (single key): trimmed,
     /// empties dropped, duplicates removed, order preserved.
     fn parse(list: Option<&str>, single: Option<&str>) -> Self {
-        let mut keys: Vec<String> = Vec::new();
-        for k in list
+        let mut digests: Vec<[u8; 32]> = Vec::new();
+        for key in list
             .unwrap_or("")
             .split(',')
             .chain(single)
             .map(str::trim)
             .filter(|k| !k.is_empty())
         {
-            if !keys.iter().any(|x| x == k) {
-                keys.push(k.to_string());
+            let digest = Self::digest(key);
+            if !digests.contains(&digest) {
+                digests.push(digest);
             }
         }
-        Self(keys)
+        Self(digests)
+    }
+
+    fn digest(key: &str) -> [u8; 32] {
+        Sha256::digest(key.as_bytes()).into()
     }
 
     fn is_enabled(&self) -> bool {
@@ -140,13 +146,13 @@ impl ApiKeys {
         self.0.len()
     }
 
-    /// Compare SHA-256 digests in constant time (fixed length, so the key
-    /// length does not leak either) and scan every key without early exit.
+    /// Compare digests in constant time (fixed length, so the key length does
+    /// not leak either) and scan every key without early exit.
     fn matches(&self, given: &str) -> bool {
-        let given = Sha256::digest(given.as_bytes());
-        self.0.iter().fold(false, |found, key| {
-            found | constant_time_eq(&Sha256::digest(key.as_bytes()), &given)
-        })
+        let given = Self::digest(given);
+        self.0
+            .iter()
+            .fold(false, |found, key| found | constant_time_eq(key, &given))
     }
 }
 
@@ -1303,7 +1309,7 @@ mod tests {
     }
 
     fn test_keys(keys: &[&str]) -> ApiKeys {
-        ApiKeys(keys.iter().map(|k| k.to_string()).collect())
+        ApiKeys::parse(Some(&keys.join(",")), None)
     }
 
     macro_rules! app {
