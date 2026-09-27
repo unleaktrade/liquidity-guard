@@ -131,6 +131,47 @@ Environment variables:
 | `API_KEYS` | No | — | Comma-separated API keys required on `POST /check` (and accepted on `/metrics`). Unset = no authentication |
 | `API_KEY` | No | — | Single API key, merged with `API_KEYS` |
 
+## Deployment (Heroku)
+
+Three Heroku apps run the Docker image (`heroku.yml`). Deploy by pushing `main` to the app's git remote, and keep the GitHub branch of the same name in sync:
+
+| Instance | Git remote → Heroku app | Guard key (`/health.service_pubkey`) | Settings besides `SIGNING_KEY`, `USDC_MINT`, `METRICS_TOKEN` |
+|---|---|---|---|
+| devnet | `devnet` → `liquidity-guard-devnet` | must equal devnet `Config.liquidity_guard` | `API_KEYS`, `RATE_LIMIT=1`, `RATE_LIMIT_TRUST_PROXY=1` |
+| devnet, skip | `devnet_skip` → `liquidity-guard-devnet-skip` | test-only key (not in Config) | `API_KEYS`, `SKIP_FUND_CHECKS=1` |
+| mainnet | `heroku` → `liquidity-guard-mainnet` | must equal mainnet `Config.liquidity_guard` | `SOLANA_NETWORK=mainnet`, `API_KEYS`, `RATE_LIMIT=1`, `RATE_LIMIT_TRUST_PROXY=1` |
+
+```sh
+git push devnet main && git push origin main:devnet                 # same for devnet_skip; mainnet: git push heroku main
+curl -s https://<app-host>/health                                  # after each deploy
+```
+
+The devnet-skip instance signs with a key that is not the on-chain `Config.liquidity_guard`: it serves settlement-engine's test validator, not the deployed program.
+
+### API keys: one per consumer
+
+Each consumer gets its own random key (`openssl rand -hex 32`), listed in the `API_KEYS` of the instance it calls. Keys never go in the repo.
+
+| Consumer | Instance(s) | Where the consumer reads it |
+|---|---|---|
+| Web app (`unleaktrade/app`) | devnet, mainnet | GitHub secrets `LG_API_KEY_DEVNET` / `LG_API_KEY_MAINNET`, inlined at build time: **public** in the JS bundle, a client identifier rather than a secret |
+| settlement-engine CI | devnet-skip | GitHub secret `LIQUIDITY_GUARD_API_KEY` |
+| `app` seed script | devnet | `--api-key` / `LG_API_KEY` (kept by the operator) |
+| Postman | each instance | `API_KEY` (secret) in the matching workspace environment |
+
+Because the app key is public, abuse protection on the browser-facing instances is the per-client rate limit; the key only lets you cut off one consumer without touching the others.
+
+**Rotate a key** (no downtime, since `API_KEYS` takes several values): add the new key next to the old one in `API_KEYS`, update the consumer (and redeploy it, for the app), then remove the old key. **Revoke** by removing it from `API_KEYS`; changing a config var restarts the dyno.
+
+**Check an instance** after any change:
+
+```sh
+curl -s -o /dev/null -w "%{http_code}\n" -X POST https://<app-host>/check -H 'Content-Type: application/json' -d @check.json        # 401
+curl -s -o /dev/null -w "%{http_code}\n" -X POST https://<app-host>/check -H 'Content-Type: application/json' -H "X-API-Key: $KEY" -d @check.json   # 200, or 400 when the taker lacks funds
+```
+
+or run the Postman collection against the instance's environment (`npx newman run postman/liquidity-guard.postman_collection.json -e <env.json> --delay-request 2600`; the delay keeps the run under the rate limit).
+
 ## RPC resilience
 
 - Each RPC client uses an explicit request timeout (`SOLANA_RPC_TIMEOUT_SECS`) and a keep-alive connection pool (`SOLANA_RPC_POOL_MAX_IDLE`).
