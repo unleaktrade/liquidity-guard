@@ -98,6 +98,56 @@ struct Config {
     port: String,
     log_format: LogFormat,
     metrics_token: Option<String>,
+    api_keys: ApiKeys,
+}
+
+/// Shared-secret API keys accepted on `/check` (and `/metrics`). Empty means
+/// authentication is disabled. `Debug` never prints the keys, since `Config`
+/// is `Debug`.
+#[derive(Clone, Default, PartialEq)]
+struct ApiKeys(Vec<String>);
+
+impl std::fmt::Debug for ApiKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ApiKeys(<{} redacted>)", self.0.len())
+    }
+}
+
+impl ApiKeys {
+    /// Merge `API_KEYS` (comma-separated) and `API_KEY` (single key): trimmed,
+    /// empties dropped, duplicates removed, order preserved.
+    fn parse(list: Option<&str>, single: Option<&str>) -> Self {
+        let mut keys: Vec<String> = Vec::new();
+        for k in list
+            .unwrap_or("")
+            .split(',')
+            .chain(single.into_iter())
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+        {
+            if !keys.iter().any(|x| x == k) {
+                keys.push(k.to_string());
+            }
+        }
+        Self(keys)
+    }
+
+    fn is_enabled(&self) -> bool {
+        !self.0.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Compare SHA-256 digests in constant time (fixed length, so the key
+    /// length does not leak either) and scan every key without early exit.
+    fn matches(&self, given: &str) -> bool {
+        let given = Sha256::digest(given.as_bytes());
+        self.0.iter().fold(false, |found, key| {
+            found | constant_time_eq(&Sha256::digest(key.as_bytes()), &given)
+        })
+    }
 }
 
 /// Log output format: JSON lines (default, for log aggregation) or
@@ -207,6 +257,7 @@ impl Config {
             metrics_token: get("METRICS_TOKEN")
                 .map(|t| t.trim().to_string())
                 .filter(|t| !t.is_empty()),
+            api_keys: ApiKeys::parse(get("API_KEYS").as_deref(), get("API_KEY").as_deref()),
         }
     }
 }
@@ -438,6 +489,7 @@ struct AppState {
     network_str: String,
     usdc_mint: Pubkey,
     skip_fund_checks: bool,
+    api_keys: Arc<ApiKeys>,
 }
 
 /// Derive the Associated Token Account address (same logic as spl_associated_token_account).
@@ -703,8 +755,10 @@ fn rate_limit_config() -> RateLimitConfig {
         .expect("invalid governor config")
 }
 
-/// Register the JSON body limit and the routes. `/ready` and `/check` are
-/// wrapped with the rate limiter when `governor` is set.
+/// Register the JSON body limit and the routes. `/check` requires an API key
+/// (when `API_KEYS` is set); `/ready` and `/check` are wrapped with the rate
+/// limiter when `governor` is set. The Governor is the outer wrap, so it runs
+/// before the key check and also throttles key guessing.
 fn routes(cfg: &mut web::ServiceConfig, governor: Option<&RateLimitConfig>) {
     cfg.app_data(
         web::JsonConfig::default()
@@ -714,6 +768,9 @@ fn routes(cfg: &mut web::ServiceConfig, governor: Option<&RateLimitConfig>) {
     .route("/health", web::get().to(health))
     .route("/metrics", web::get().to(metrics_handler));
 
+    let check = web::resource("/check")
+        .wrap(actix_web::middleware::from_fn(require_api_key))
+        .route(web::post().to(check));
     match governor {
         Some(conf) => {
             cfg.service(
@@ -721,15 +778,10 @@ fn routes(cfg: &mut web::ServiceConfig, governor: Option<&RateLimitConfig>) {
                     .wrap(Governor::new(conf))
                     .route(web::get().to(ready)),
             )
-            .service(
-                web::resource("/check")
-                    .wrap(Governor::new(conf))
-                    .route(web::post().to(check)),
-            );
+            .service(check.wrap(Governor::new(conf)));
         }
         None => {
-            cfg.route("/ready", web::get().to(ready))
-                .route("/check", web::post().to(check));
+            cfg.route("/ready", web::get().to(ready)).service(check);
         }
     }
 }
@@ -798,11 +850,13 @@ fn build_metrics() -> (PrometheusMetrics, IntCounterVec) {
     (prometheus, rpc_requests)
 }
 
-/// Registry exposed on `/metrics`, with the optional bearer token.
+/// Registry exposed on `/metrics`, with the optional bearer token. API keys
+/// are also accepted there.
 #[derive(Clone)]
 struct MetricsState {
     registry: Registry,
     token: Option<String>,
+    api_keys: Arc<ApiKeys>,
 }
 
 /// Constant-time byte comparison, so the token check does not leak a prefix
@@ -811,24 +865,73 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-fn authorized(req: &HttpRequest, token: Option<&str>) -> bool {
-    let Some(expected) = token else {
+static X_API_KEY: HeaderName = HeaderName::from_static("x-api-key");
+
+/// The credential a client presented: `X-API-Key: <key>` first, else
+/// `Authorization: Bearer <key>` (scheme is case-sensitive).
+fn presented_key(headers: &actix_web::http::header::HeaderMap) -> Option<&str> {
+    let header = |name: &HeaderName| headers.get(name).and_then(|v| v.to_str().ok());
+    header(&X_API_KEY)
+        .or_else(|| header(&AUTHORIZATION).and_then(|v| v.strip_prefix("Bearer ")))
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+}
+
+/// `/metrics` is open when neither `METRICS_TOKEN` nor `API_KEYS` is set;
+/// otherwise either credential grants access.
+fn metrics_authorized(req: &HttpRequest, state: &MetricsState) -> bool {
+    if state.token.is_none() && !state.api_keys.is_enabled() {
         return true;
-    };
-    req.headers()
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .is_some_and(|given| constant_time_eq(given.trim().as_bytes(), expected.as_bytes()))
+    }
+    presented_key(req.headers()).is_some_and(|given| {
+        let token_ok = state.token.as_deref().is_some_and(|t| {
+            constant_time_eq(
+                &Sha256::digest(given.as_bytes()),
+                &Sha256::digest(t.as_bytes()),
+            )
+        });
+        token_ok | state.api_keys.matches(given)
+    })
+}
+
+fn unauthorized() -> HttpResponse {
+    HttpResponse::Unauthorized()
+        .insert_header(("WWW-Authenticate", "Bearer"))
+        .json(ErrorResponse {
+            error: "Unauthorized".to_string(),
+        })
+}
+
+/// Route middleware for `/check`: rejects the request with 401 before the
+/// body is parsed unless it carries a valid API key. A no-op when `API_KEYS`
+/// is unset. Missing and invalid keys get the same response; only the log
+/// line says which (never the key itself).
+async fn require_api_key(
+    req: ServiceRequest,
+    next: actix_web::middleware::Next<impl MessageBody + 'static>,
+) -> Result<ServiceResponse<actix_web::body::EitherBody<impl MessageBody>>, actix_web::Error> {
+    let keys = req
+        .app_data::<web::Data<AppState>>()
+        .map(|s| s.api_keys.clone())
+        // Fail closed if the state is missing.
+        .ok_or_else(|| actix_web::error::ErrorInternalServerError("missing app state"))?;
+    if keys.is_enabled() {
+        let reason = match presented_key(req.headers()) {
+            None => Some("missing"),
+            Some(k) if !keys.matches(k) => Some("invalid"),
+            Some(_) => None,
+        };
+        if let Some(reason) = reason {
+            warn!(reason, path = req.path(), "API key rejected");
+            return Ok(req.into_response(unauthorized()).map_into_right_body());
+        }
+    }
+    Ok(next.call(req).await?.map_into_left_body())
 }
 
 async fn metrics_handler(req: HttpRequest, state: web::Data<MetricsState>) -> HttpResponse {
-    if !authorized(&req, state.token.as_deref()) {
-        return HttpResponse::Unauthorized()
-            .insert_header(("WWW-Authenticate", "Bearer"))
-            .json(ErrorResponse {
-                error: "Unauthorized".to_string(),
-            });
+    if !metrics_authorized(&req, &state) {
+        return unauthorized();
     }
     let encoder = TextEncoder::new();
     let mut buffer = Vec::new();
@@ -927,12 +1030,22 @@ async fn main() -> std::io::Result<()> {
     .expect("failed to install tracing subscriber");
 
     let (prometheus, rpc_requests) = build_metrics();
+    let api_keys = Arc::new(config.api_keys.clone());
+    if api_keys.is_enabled() {
+        info!(
+            keys = api_keys.len(),
+            "API key authentication enabled on /check"
+        );
+    } else {
+        warn!("API_KEYS is not set: /check is unauthenticated");
+    }
     let metrics_state = web::Data::new(MetricsState {
         registry: prometheus.registry.clone(),
         token: config.metrics_token.clone(),
+        api_keys: api_keys.clone(),
     });
-    if config.metrics_token.is_none() {
-        warn!("METRICS_TOKEN is not set: /metrics is publicly readable");
+    if config.metrics_token.is_none() && !api_keys.is_enabled() {
+        warn!("METRICS_TOKEN and API_KEYS are not set: /metrics is publicly readable");
     }
 
     // SIGNING_KEY is base58 keypair string
@@ -962,6 +1075,7 @@ async fn main() -> std::io::Result<()> {
         network_str: format!("{:?}", config.network),
         usdc_mint,
         skip_fund_checks: config.skip_fund_checks,
+        api_keys,
     });
 
     let bind = format!("0.0.0.0:{}", config.port);
@@ -1168,8 +1282,28 @@ mod tests {
                 network_str: "Devnet".into(),
                 usdc_mint: self.usdc_mint,
                 skip_fund_checks,
+                api_keys: Arc::new(ApiKeys::default()),
             })
         }
+        fn state_with_keys(
+            &self,
+            rpc: SolanaRpc,
+            skip_fund_checks: bool,
+            keys: &[&str],
+        ) -> web::Data<AppState> {
+            web::Data::new(AppState {
+                rpc: Arc::new(rpc),
+                service_keypair: self.service.clone(),
+                network_str: "Devnet".into(),
+                usdc_mint: self.usdc_mint,
+                skip_fund_checks,
+                api_keys: Arc::new(test_keys(keys)),
+            })
+        }
+    }
+
+    fn test_keys(keys: &[&str]) -> ApiKeys {
+        ApiKeys(keys.iter().map(|k| k.to_string()).collect())
     }
 
     macro_rules! app {
@@ -1194,11 +1328,26 @@ mod tests {
         >,
         body: &Value,
     ) -> (StatusCode, String) {
-        let req = atest::TestRequest::post()
+        post_check_with(app, body, &[]).await
+    }
+
+    async fn post_check_with<B: actix_web::body::MessageBody>(
+        app: &impl actix_web::dev::Service<
+            actix_http::Request,
+            Response = actix_web::dev::ServiceResponse<B>,
+            Error = actix_web::Error,
+        >,
+        body: &Value,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, String) {
+        let mut req = atest::TestRequest::post()
             .uri("/check")
             .peer_addr("10.0.0.1:1234".parse().unwrap())
-            .set_json(body)
-            .to_request();
+            .set_json(body);
+        for (k, v) in headers {
+            req = req.insert_header((*k, *v));
+        }
+        let req = req.to_request();
         let resp = atest::call_service(app, req).await;
         let status = resp.status();
         let bytes = atest::read_body(resp).await;
@@ -1351,6 +1500,7 @@ mod tests {
                 port: "8080".into(),
                 log_format: LogFormat::Json,
                 metrics_token: None,
+                api_keys: ApiKeys::default(),
             }
         );
         assert_eq!(c.rpc.timeout, Duration::from_secs(10));
@@ -2036,6 +2186,54 @@ mod tests {
         }
     }
 
+    thread_local! {
+        static CAPTURE: std::cell::RefCell<Option<LogBuf>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// Writer for the process-wide test subscriber: appends to the calling
+    /// thread's capture buffer, or discards when the thread captures nothing.
+    struct ThreadCapture;
+
+    impl<'a> MakeWriter<'a> for ThreadCapture {
+        type Writer = Box<dyn std::io::Write>;
+        fn make_writer(&'a self) -> Self::Writer {
+            match CAPTURE.with(|c| c.borrow().clone()) {
+                Some(buf) => Box::new(buf),
+                None => Box::new(std::io::sink()),
+            }
+        }
+    }
+
+    struct CaptureGuard;
+
+    impl Drop for CaptureGuard {
+        fn drop(&mut self) {
+            CAPTURE.with(|c| c.borrow_mut().take());
+        }
+    }
+
+    /// Capture this test thread's JSON logs (`info` filter) in memory.
+    ///
+    /// Tests run in parallel, and `tracing` keeps callsite interest and the max
+    /// level in process-wide caches that are recomputed whenever a scoped
+    /// (`set_default`) subscriber comes or goes on another thread, which
+    /// intermittently dropped events. One global subscriber that is never
+    /// replaced, routing each thread's output to its own buffer, avoids that.
+    fn capture_json_logs() -> (LogBuf, CaptureGuard) {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            tracing::subscriber::set_global_default(build_subscriber(
+                LogFormat::Json,
+                "info",
+                ThreadCapture,
+            ))
+            .expect("global test subscriber");
+        });
+        let buf = LogBuf::default();
+        CAPTURE.with(|c| *c.borrow_mut() = Some(buf.clone()));
+        (buf, CaptureGuard)
+    }
+
     struct Observed {
         metrics: web::Data<MetricsState>,
         prometheus: PrometheusMetrics,
@@ -2043,11 +2241,16 @@ mod tests {
     }
 
     fn observed(token: Option<&str>) -> Observed {
+        observed_with_keys(token, &[])
+    }
+
+    fn observed_with_keys(token: Option<&str>, keys: &[&str]) -> Observed {
         let (prometheus, rpc_requests) = build_metrics();
         Observed {
             metrics: web::Data::new(MetricsState {
                 registry: prometheus.registry.clone(),
                 token: token.map(String::from),
+                api_keys: Arc::new(test_keys(keys)),
             }),
             prometheus,
             rpc_requests,
@@ -2273,12 +2476,7 @@ mod tests {
 
     #[actix_web::test]
     async fn json_logs_carry_request_fields_and_request_id_header() {
-        let buf = LogBuf::default();
-        let _guard = tracing::subscriber::set_default(build_subscriber(
-            LogFormat::Json,
-            "info",
-            buf.clone(),
-        ));
+        let (buf, _guard) = capture_json_logs();
         let fx = Fixture::new();
         let obs = observed(None);
         let state = fx.state(SolanaRpc::new(&dead_url(), None, &fast_settings()), true);
@@ -2326,12 +2524,7 @@ mod tests {
 
     #[actix_web::test]
     async fn json_logs_server_errors_and_fallback_warning_are_redacted() {
-        let buf = LogBuf::default();
-        let _guard = tracing::subscriber::set_default(build_subscriber(
-            LogFormat::Json,
-            "info",
-            buf.clone(),
-        ));
+        let (buf, _guard) = capture_json_logs();
         let fx = Fixture::new();
         let obs = observed(None);
         let primary = format!("{}/SECRET/?api-key=SECRET", dead_url());
@@ -2378,5 +2571,327 @@ mod tests {
         );
         assert!(!text.contains("hidden at info"));
         assert!(serde_json::from_str::<Value>(text.lines().next().unwrap()).is_err());
+    }
+
+    // ---------- API key authentication ----------
+
+    #[test]
+    fn api_keys_config() {
+        assert!(!config(&[]).api_keys.is_enabled());
+        let c = config(&[("API_KEYS", " k1, ,k2,k1 ,"), ("API_KEY", "k3")]);
+        assert_eq!(c.api_keys, test_keys(&["k1", "k2", "k3"]));
+        assert_eq!(
+            config(&[("API_KEY", "solo")]).api_keys,
+            test_keys(&["solo"])
+        );
+        assert_eq!(
+            config(&[("API_KEYS", "k1"), ("API_KEY", "k1")])
+                .api_keys
+                .len(),
+            1
+        );
+        assert!(!config(&[("API_KEYS", " , "), ("API_KEY", " ")])
+            .api_keys
+            .is_enabled());
+        // Debug output (and so `{:?}` of the whole Config) never shows a key.
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("ApiKeys(<3 redacted>)"), "{dbg}");
+        assert!(!dbg.contains("k1") && !dbg.contains("k3"), "{dbg}");
+    }
+
+    #[test]
+    fn api_keys_matching() {
+        let keys = test_keys(&["alpha-key", "beta-key"]);
+        assert!(keys.matches("alpha-key"));
+        assert!(keys.matches("beta-key"));
+        for bad in ["", "alpha", "alpha-key ", "alpha-keyX", "ALPHA-KEY", "beta"] {
+            assert!(!keys.matches(bad), "{bad:?}");
+        }
+        assert!(!ApiKeys::default().matches(""));
+    }
+
+    #[test]
+    fn presented_key_extraction() {
+        let headers = |pairs: &[(&str, &str)]| {
+            let mut req = atest::TestRequest::get();
+            for (k, v) in pairs {
+                req = req.insert_header((*k, *v));
+            }
+            req.to_http_request().headers().clone()
+        };
+        let h = headers(&[("X-API-Key", " k ")]);
+        assert_eq!(presented_key(&h), Some("k"));
+        let h = headers(&[("Authorization", "Bearer k")]);
+        assert_eq!(presented_key(&h), Some("k"));
+        // X-API-Key wins over Authorization.
+        let h = headers(&[("X-API-Key", "a"), ("Authorization", "Bearer b")]);
+        assert_eq!(presented_key(&h), Some("a"));
+        for auth in ["bearer k", "Basic k", "k", "Bearer ", "Bearer   "] {
+            let h = headers(&[("Authorization", auth)]);
+            assert_eq!(presented_key(&h), None, "{auth:?}");
+        }
+        assert_eq!(presented_key(&headers(&[("X-API-Key", "")])), None);
+        assert_eq!(presented_key(&headers(&[])), None);
+    }
+
+    #[actix_web::test]
+    async fn check_requires_api_key_when_configured() {
+        let fx = Fixture::new();
+        let state = fx.state_with_keys(
+            SolanaRpc::new(&dead_url(), None, &fast_settings()),
+            true,
+            &["key-one", "key-two"],
+        );
+        let app = app!(state);
+        let body = fx.body(1, 1, "0");
+        for headers in [
+            vec![],
+            vec![("X-API-Key", "wrong")],
+            vec![("X-API-Key", "key-on")],
+            vec![("X-API-Key", "key-one-")],
+            vec![("Authorization", "Bearer wrong")],
+            vec![("Authorization", "bearer key-one")],
+            vec![("Authorization", "Basic key-one")],
+            vec![("Authorization", "key-one")],
+        ] {
+            let (status, text) = post_check_with(&app, &body, &headers).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{headers:?}: {text}");
+            let v: Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(v, json!({"error": "Unauthorized"}), "{headers:?}");
+            assert!(!text.contains("key-one"));
+        }
+        for headers in [
+            vec![("X-API-Key", "key-one")],
+            vec![("X-API-Key", "key-two")],
+            vec![("Authorization", "Bearer key-one")],
+            vec![("Authorization", "Bearer key-two")],
+            // A valid X-API-Key wins even with a wrong bearer.
+            vec![("X-API-Key", "key-two"), ("Authorization", "Bearer nope")],
+        ] {
+            let (status, text) = post_check_with(&app, &body, &headers).await;
+            assert_eq!(status, StatusCode::OK, "{headers:?}: {text}");
+            assert!(text.contains("commit_hash"));
+        }
+    }
+
+    #[actix_web::test]
+    async fn unauthorized_check_carries_bearer_challenge() {
+        let fx = Fixture::new();
+        let state = fx.state_with_keys(
+            SolanaRpc::new(&dead_url(), None, &fast_settings()),
+            true,
+            &["k"],
+        );
+        let app = app!(state);
+        let req = atest::TestRequest::post()
+            .uri("/check")
+            .set_json(fx.body(1, 1, "0"))
+            .to_request();
+        let resp = atest::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(resp.headers().get("www-authenticate").unwrap(), "Bearer");
+    }
+
+    #[actix_web::test]
+    async fn auth_runs_before_body_parsing() {
+        let fx = Fixture::new();
+        let state = fx.state_with_keys(
+            SolanaRpc::new(&dead_url(), None, &fast_settings()),
+            true,
+            &["k"],
+        );
+        let app = app!(state);
+        // Invalid body and oversized body: still 401 without a key, so an
+        // unauthenticated caller learns nothing about validation.
+        let mut bad = fx.body(1, 1, "0");
+        bad["rfq"] = json!("nope");
+        let (status, _) = post_check_with(&app, &bad, &[]).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let huge = json!({ "rfq": "x".repeat(4096) });
+        let (status, _) = post_check_with(&app, &huge, &[]).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        // With the key, the same bodies reach validation.
+        let (status, _) = post_check_with(&app, &bad, &[("X-API-Key", "k")]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = post_check_with(&app, &huge, &[("X-API-Key", "k")]).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[actix_web::test]
+    async fn health_and_ready_stay_open_with_api_keys() {
+        let fx = Fixture::new();
+        let mock = Mock::new(Mode::Ok);
+        let state = fx.state_with_keys(
+            SolanaRpc::new(&start_mock(mock), None, &fast_settings()),
+            true,
+            &["k"],
+        );
+        let app = app!(state);
+        for uri in ["/health", "/ready"] {
+            let req = atest::TestRequest::get().uri(uri).to_request();
+            assert_eq!(
+                atest::call_service(&app, req).await.status(),
+                StatusCode::OK,
+                "{uri}"
+            );
+        }
+    }
+
+    #[actix_web::test]
+    async fn rate_limiter_runs_before_api_key_check() {
+        let fx = Fixture::new();
+        let state = fx.state_with_keys(
+            SolanaRpc::new(&dead_url(), None, &fast_settings()),
+            true,
+            &["k"],
+        );
+        let gov = rate_limit_config();
+        let app = app!(state, Some(&gov));
+        let body = fx.body(1, 1, "0");
+        // Unauthenticated attempts consume the per-IP quota (throttles key guessing)...
+        for i in 0..5 {
+            let (status, _) = post_check_with(&app, &body, &[("X-API-Key", "guess")]).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "attempt {i}");
+        }
+        let (status, _) = post_check_with(&app, &body, &[("X-API-Key", "guess")]).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        // ...and the limiter answers before the key is even looked at.
+        let (status, _) = post_check_with(&app, &body, &[("X-API-Key", "k")]).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[actix_web::test]
+    async fn cors_preflight_with_api_key_header_is_not_challenged() {
+        let fx = Fixture::new();
+        let obs = observed(None);
+        let state = fx.state_with_keys(
+            SolanaRpc::new(&dead_url(), None, &fast_settings()),
+            true,
+            &["k"],
+        );
+        let gov = rate_limit_config();
+        let app = full_app!(state, obs, Some(&gov));
+        let req = atest::TestRequest::default()
+            .method(actix_web::http::Method::OPTIONS)
+            .uri("/check")
+            .peer_addr("10.0.0.3:1234".parse().unwrap())
+            .insert_header(("Origin", "https://app.unleak.trade"))
+            .insert_header(("Access-Control-Request-Method", "POST"))
+            .insert_header(("Access-Control-Request-Headers", "content-type,x-api-key"))
+            .to_request();
+        let resp = atest::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let h = resp.headers();
+        assert_eq!(h.get("access-control-allow-origin").unwrap(), "*");
+        let allowed = h
+            .get("access-control-allow-headers")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_lowercase();
+        assert!(allowed.contains("x-api-key"), "{allowed}");
+        // The actual cross-origin request with the key succeeds and is CORS-tagged.
+        let req = atest::TestRequest::post()
+            .uri("/check")
+            .peer_addr("10.0.0.3:1234".parse().unwrap())
+            .insert_header(("Origin", "https://app.unleak.trade"))
+            .insert_header(("X-API-Key", "k"))
+            .set_json(fx.body(1, 1, "0"))
+            .to_request();
+        let resp = atest::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("access-control-allow-origin").unwrap(),
+            "*"
+        );
+    }
+
+    #[actix_web::test]
+    async fn metrics_accepts_api_keys_and_token() {
+        let fx = Fixture::new();
+        let state = fx.state(SolanaRpc::new(&dead_url(), None, &fast_settings()), true);
+        let scrape_with = |header: Option<(&'static str, &'static str)>| {
+            let mut req = atest::TestRequest::get().uri("/metrics");
+            if let Some(h) = header {
+                req = req.insert_header(h);
+            }
+            req.to_request()
+        };
+
+        // Token + keys: either credential works, via Bearer or X-API-Key.
+        let obs = observed_with_keys(Some("tok"), &["key"]);
+        let app = full_app!(state, obs, None);
+        for (h, ok) in [
+            (None, false),
+            (Some(("Authorization", "Bearer tok")), true),
+            (Some(("Authorization", "Bearer key")), true),
+            (Some(("X-API-Key", "key")), true),
+            (Some(("X-API-Key", "tok")), true),
+            (Some(("X-API-Key", "nope")), false),
+            (Some(("Authorization", "Bearer nope")), false),
+        ] {
+            let resp = atest::call_service(&app, scrape_with(h)).await;
+            let want = if ok {
+                StatusCode::OK
+            } else {
+                StatusCode::UNAUTHORIZED
+            };
+            assert_eq!(resp.status(), want, "{h:?}");
+        }
+
+        // Keys only (no METRICS_TOKEN): /metrics is protected by the keys.
+        let obs = observed_with_keys(None, &["key"]);
+        let app = full_app!(state, obs, None);
+        let resp = atest::call_service(&app, scrape_with(None)).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let resp = atest::call_service(&app, scrape_with(Some(("X-API-Key", "key")))).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Neither: open, as before.
+        let obs = observed(None);
+        let app = full_app!(state, obs, None);
+        let resp = atest::call_service(&app, scrape_with(None)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[actix_web::test]
+    async fn rejected_api_keys_are_logged_without_the_key() {
+        let (buf, _guard) = capture_json_logs();
+        let fx = Fixture::new();
+        let obs = observed(None);
+        let state = fx.state_with_keys(
+            SolanaRpc::new(&dead_url(), None, &fast_settings()),
+            true,
+            &["the-real-key"],
+        );
+        let app = full_app!(state, obs, None);
+        let body = fx.body(1, 1, "0");
+        assert_eq!(
+            post_check_with(&app, &body, &[]).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (s, _) = post_check_with(&app, &body, &[("X-API-Key", "guessed-key")]).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+        let (s, _) = post_check_with(&app, &body, &[("X-API-Key", "the-real-key")]).await;
+        assert_eq!(s, StatusCode::OK);
+
+        let text = buf.text();
+        assert!(
+            !text.contains("the-real-key") && !text.contains("guessed-key"),
+            "{text}"
+        );
+        let lines = buf.json_lines();
+        let reasons: Vec<&str> = lines
+            .iter()
+            .filter(|l| l["message"] == "API key rejected")
+            .map(|l| l["reason"].as_str().unwrap())
+            .collect();
+        assert_eq!(reasons, ["missing", "invalid"], "{text}");
+        let statuses: Vec<u64> = lines
+            .iter()
+            .filter(|l| l["message"] == "request completed")
+            .map(|l| l["status"].as_u64().unwrap())
+            .collect();
+        assert_eq!(statuses, [401, 401, 200]);
     }
 }

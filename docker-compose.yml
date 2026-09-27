@@ -27,6 +27,7 @@ services:
       # LOG_FORMAT: pretty
       # RUST_LOG: info
       # METRICS_TOKEN: change-me
+      # API_KEYS: key-for-app,key-for-ci
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
       interval: 30s

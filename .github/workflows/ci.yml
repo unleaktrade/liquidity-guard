@@ -25,3 +25,40 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Test
         run: cargo test --locked
+
+  # Runs the Postman collection (postman/) with newman against a locally started
+  # instance: ephemeral keys from `cargo run --example postman_env`, API keys and
+  # METRICS_TOKEN on, SKIP_FUND_CHECKS so /check needs no RPC. The `rpc` folder
+  # (/ready) is skipped because it needs a live Solana RPC.
+  newman:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system packages
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libssl-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build
+        run: cargo build --locked --bin liquidity-guard --example postman_env
+      - name: Generate ephemeral fixtures
+        run: cargo run --locked --example postman_env -- "$RUNNER_TEMP/pm"
+      - name: Start liquidity-guard
+        run: |
+          set -a; . "$RUNNER_TEMP/pm/server.env"; set +a
+          nohup ./target/debug/liquidity-guard > "$RUNNER_TEMP/pm/server.log" 2>&1 &
+          for _ in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8080/health > /dev/null && exit 0
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/pm/server.log"; exit 1
+      - name: Newman
+        run: >-
+          npx --yes newman@6 run postman/liquidity-guard.postman_collection.json
+          -e "$RUNNER_TEMP/pm/postman_environment.json"
+          --folder public --folder check --folder metrics
+      - name: Server log
+        if: always()
+        run: cat "$RUNNER_TEMP/pm/server.log" || true

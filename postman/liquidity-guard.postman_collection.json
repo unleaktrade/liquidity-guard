@@ -1,0 +1,994 @@
+{
+  "info": {
+    "_postman_id": "c4d081b8-339e-4af3-bbf0-a61d904af8a9",
+    "name": "unleaktrade-liquidity-guard",
+    "description": "Liquidity Guard attestation service. Select one of the `*-liquidity guard` environments.\n\nEnvironment variables:\n- `API_URL`, `SERVICE_PUBKEY`, `SERVICE_NETWORK`: target instance.\n- `API_KEY`: one of the server's `API_KEYS` (sent as `X-API-Key`, or as `Authorization: Bearer`). Empty when the instance runs without API keys; the 401 assertions then turn into \"open\" assertions.\n- `METRICS_TOKEN`: bearer for `/metrics` (empty when unset on the instance).\n- `RFQ`, `TAKER`, `SALT`, `QUOTE_MINT`, `QUOTE_AMOUNT`, `BOND_AMOUNT_USDC`, `TAKER_FEE_BPS`: a `/check` request (`SALT` must be the taker's Ed25519 signature of the RFQ pubkey).\n- `EXPECT_CHECK_STATUS` (optional): pin the `/check` status (e.g. `200` on a SKIP_FUND_CHECKS instance).\n\nAuth matrix: `/check` and `/metrics` need a credential when configured; `/health`, `/ready` and CORS preflights never do.\n\nThe repo copy lives in `postman/` and runs in CI with newman against an ephemeral local instance (`cargo run --example postman_env`), folders `public`, `check` and `metrics`.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "public",
+      "id": "5bd2a83f-6d56-5600-a1b6-2ffcfa4aa86a",
+      "description": "Unauthenticated endpoints.",
+      "item": [
+        {
+          "name": "health",
+          "id": "84dbd42e-6826-4feb-92c6-9ecd63060e90",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// /health stays unauthenticated: it is polled by the app's HealthPill,",
+                  "// Docker HEALTHCHECK and uptime probes. This request sends no credential.",
+                  "pm.test(\"Status code is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "let response = pm.response.json();",
+                  "",
+                  "pm.test(\"Service public key matches environment variable\", function () {",
+                  "    pm.expect(response.service_pubkey).to.eql(pm.variables.get(\"SERVICE_PUBKEY\"));",
+                  "});",
+                  "",
+                  "pm.test(\"Network matches environment variable\", function () {",
+                  "    pm.expect(response.network).to.eql(pm.variables.get(\"SERVICE_NETWORK\"));",
+                  "});",
+                  "",
+                  "pm.test(\"Response status is healthy\", function () {",
+                  "    pm.expect(response.status).to.eql(\"healthy\");",
+                  "});",
+                  "",
+                  "pm.test(\"skip_fund_checks is a boolean\", function () {",
+                  "    pm.expect(response.skip_fund_checks).to.be.a(\"boolean\");",
+                  "});",
+                  "",
+                  "pm.test(\"X-Request-Id header is a UUID\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"X-Request-Id\")).to.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Origin",
+                "value": "https://app.unleak.trade"
+              }
+            ],
+            "url": {
+              "raw": "{{API_URL}}/health",
+              "host": [
+                "{{API_URL}}"
+              ],
+              "path": [
+                "health"
+              ]
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          }
+        },
+        {
+          "name": "check (CORS preflight)",
+          "id": "f7135314-0de0-48bd-9bc2-4dcb5f2577bb",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Preflights are answered by CORS before the rate limiter and the API key check.",
+                  "pm.test(\"Preflight is accepted (never 401)\", function () {",
+                  "    pm.expect(pm.response.code).to.be.oneOf([200, 204]);",
+                  "});",
+                  "",
+                  "pm.test(\"Wildcard Access-Control-Allow-Origin\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"Access-Control-Allow-Origin\")).to.eql(\"*\");",
+                  "});",
+                  "",
+                  "pm.test(\"X-API-Key is an allowed request header\", function () {",
+                  "    pm.expect((pm.response.headers.get(\"Access-Control-Allow-Headers\") || \"\").toLowerCase()).to.include(\"x-api-key\");",
+                  "});",
+                  "",
+                  "pm.test(\"Access-Control-Max-Age is set\", function () {",
+                  "    pm.expect(Number(pm.response.headers.get(\"Access-Control-Max-Age\"))).to.be.above(0);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "OPTIONS",
+            "header": [
+              {
+                "key": "Origin",
+                "value": "https://app.unleak.trade"
+              },
+              {
+                "key": "Access-Control-Request-Method",
+                "value": "POST"
+              },
+              {
+                "key": "Access-Control-Request-Headers",
+                "value": "content-type,x-api-key"
+              }
+            ],
+            "url": {
+              "raw": "{{API_URL}}/check",
+              "host": [
+                "{{API_URL}}"
+              ],
+              "path": [
+                "check"
+              ]
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "check",
+      "id": "a89d10e7-5031-578c-b26d-d945c0829f95",
+      "description": "`POST /check` \u2014 requires an API key when `API_KEYS` is set.",
+      "item": [
+        {
+          "name": "check",
+          "id": "36d9c86f-142a-4817-859f-e66e222c050c",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// 200 = proof issued; 400 = valid request but the taker lacks funds on this cluster.",
+                  "// Set EXPECT_CHECK_STATUS (e.g. 200 on a SKIP_FUND_CHECKS instance) to pin it.",
+                  "const expected = pm.variables.get(\"EXPECT_CHECK_STATUS\");",
+                  "if (expected) {",
+                  "    pm.test(\"Status code is \" + expected, function () {",
+                  "        pm.response.to.have.status(Number(expected));",
+                  "    });",
+                  "} else {",
+                  "    pm.test(\"Status code is 200 or 400 (insufficient funds)\", function () {",
+                  "        pm.expect(pm.response.code).to.be.oneOf([200, 400]);",
+                  "    });",
+                  "}",
+                  "",
+                  "pm.test(\"X-Request-Id header is a UUID\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"X-Request-Id\")).to.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);",
+                  "});",
+                  "",
+                  "if (pm.response.code === 200) {",
+                  "    let r = pm.response.json();",
+                  "    pm.test(\"commit_hash is 32 bytes hex\", function () {",
+                  "        pm.expect(r.commit_hash).to.match(/^[0-9a-f]{64}$/);",
+                  "    });",
+                  "    pm.test(\"liquidity_proof is a 64-byte Ed25519 signature hex\", function () {",
+                  "        pm.expect(r.liquidity_proof).to.match(/^[0-9a-f]{128}$/);",
+                  "    });",
+                  "    pm.test(\"service_pubkey matches environment variable\", function () {",
+                  "        pm.expect(r.service_pubkey).to.eql(pm.variables.get(\"SERVICE_PUBKEY\"));",
+                  "    });",
+                  "    pm.test(\"network matches environment variable\", function () {",
+                  "        pm.expect(r.network).to.eql(pm.variables.get(\"SERVICE_NETWORK\"));",
+                  "    });",
+                  "    pm.test(\"skip_fund_checks is a boolean\", function () {",
+                  "        pm.expect(r.skip_fund_checks).to.be.a(\"boolean\");",
+                  "    });",
+                  "    pm.test(\"Request fields are echoed back\", function () {",
+                  "        pm.expect(r.rfq).to.eql(pm.variables.get(\"RFQ\"));",
+                  "        pm.expect(r.taker).to.eql(pm.variables.get(\"TAKER\"));",
+                  "        pm.expect(r.salt).to.eql(pm.variables.get(\"SALT\"));",
+                  "        pm.expect(r.quote_mint).to.eql(pm.variables.get(\"QUOTE_MINT\"));",
+                  "        pm.expect(r.quote_amount).to.eql(pm.variables.get(\"QUOTE_AMOUNT\"));",
+                  "        pm.expect(r.bond_amount_usdc).to.eql(pm.variables.get(\"BOND_AMOUNT_USDC\"));",
+                  "        pm.expect(r.taker_fee_bps).to.eql(pm.variables.get(\"TAKER_FEE_BPS\"));",
+                  "    });",
+                  "    // The attestation is deterministic: remember it so the Bearer variant can compare.",
+                  "    pm.collectionVariables.set(\"LAST_COMMIT_HASH\", r.commit_hash);",
+                  "} else {",
+                  "    pm.test(\"400 carries an error message\", function () {",
+                  "        pm.expect(pm.response.json().error).to.be.a(\"string\").and.not.empty;",
+                  "    });",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Origin",
+                "value": "https://app.unleak.trade"
+              },
+              {
+                "key": "X-API-Key",
+                "value": "{{API_KEY}}"
+              }
+            ],
+            "url": {
+              "raw": "{{API_URL}}/check",
+              "host": [
+                "{{API_URL}}"
+              ],
+              "path": [
+                "check"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"rfq\": \"{{RFQ}}\",\n  \"taker\": \"{{TAKER}}\",\n  \"salt\": \"{{SALT}}\",\n  \"quote_mint\": \"{{QUOTE_MINT}}\",\n  \"quote_amount\": \"{{QUOTE_AMOUNT}}\",\n  \"bond_amount_usdc\": \"{{BOND_AMOUNT_USDC}}\",\n  \"taker_fee_bps\": \"{{TAKER_FEE_BPS}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          }
+        },
+        {
+          "name": "check (Bearer)",
+          "id": "454e89b0-29fb-52f7-b90e-27ebe0cb63d0",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// 200 = proof issued; 400 = valid request but the taker lacks funds on this cluster.",
+                  "// Set EXPECT_CHECK_STATUS (e.g. 200 on a SKIP_FUND_CHECKS instance) to pin it.",
+                  "const expected = pm.variables.get(\"EXPECT_CHECK_STATUS\");",
+                  "if (expected) {",
+                  "    pm.test(\"Status code is \" + expected, function () {",
+                  "        pm.response.to.have.status(Number(expected));",
+                  "    });",
+                  "} else {",
+                  "    pm.test(\"Status code is 200 or 400 (insufficient funds)\", function () {",
+                  "        pm.expect(pm.response.code).to.be.oneOf([200, 400]);",
+                  "    });",
+                  "}",
+                  "",
+                  "pm.test(\"X-Request-Id header is a UUID\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"X-Request-Id\")).to.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);",
+                  "});",
+                  "",
+                  "if (pm.response.code === 200) {",
+                  "    let r = pm.response.json();",
+                  "    pm.test(\"commit_hash is 32 bytes hex\", function () {",
+                  "        pm.expect(r.commit_hash).to.match(/^[0-9a-f]{64}$/);",
+                  "    });",
+                  "    pm.test(\"liquidity_proof is a 64-byte Ed25519 signature hex\", function () {",
+                  "        pm.expect(r.liquidity_proof).to.match(/^[0-9a-f]{128}$/);",
+                  "    });",
+                  "    pm.test(\"service_pubkey matches environment variable\", function () {",
+                  "        pm.expect(r.service_pubkey).to.eql(pm.variables.get(\"SERVICE_PUBKEY\"));",
+                  "    });",
+                  "    pm.test(\"network matches environment variable\", function () {",
+                  "        pm.expect(r.network).to.eql(pm.variables.get(\"SERVICE_NETWORK\"));",
+                  "    });",
+                  "    pm.test(\"skip_fund_checks is a boolean\", function () {",
+                  "        pm.expect(r.skip_fund_checks).to.be.a(\"boolean\");",
+                  "    });",
+                  "    pm.test(\"Request fields are echoed back\", function () {",
+                  "        pm.expect(r.rfq).to.eql(pm.variables.get(\"RFQ\"));",
+                  "        pm.expect(r.taker).to.eql(pm.variables.get(\"TAKER\"));",
+                  "        pm.expect(r.salt).to.eql(pm.variables.get(\"SALT\"));",
+                  "        pm.expect(r.quote_mint).to.eql(pm.variables.get(\"QUOTE_MINT\"));",
+                  "        pm.expect(r.quote_amount).to.eql(pm.variables.get(\"QUOTE_AMOUNT\"));",
+                  "        pm.expect(r.bond_amount_usdc).to.eql(pm.variables.get(\"BOND_AMOUNT_USDC\"));",
+                  "        pm.expect(r.taker_fee_bps).to.eql(pm.variables.get(\"TAKER_FEE_BPS\"));",
+                  "    });",
+                  "    pm.test(\"Same commit_hash as the X-API-Key request (deterministic)\", function () {",
+                  "        const prev = pm.collectionVariables.get(\"LAST_COMMIT_HASH\");",
+                  "        if (prev) { pm.expect(r.commit_hash).to.eql(prev); }",
+                  "    });",
+                  "} else {",
+                  "    pm.test(\"400 carries an error message\", function () {",
+                  "        pm.expect(pm.response.json().error).to.be.a(\"string\").and.not.empty;",
+                  "    });",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Origin",
+                "value": "https://app.unleak.trade"
+              }
+            ],
+            "url": {
+              "raw": "{{API_URL}}/check",
+              "host": [
+                "{{API_URL}}"
+              ],
+              "path": [
+                "check"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"rfq\": \"{{RFQ}}\",\n  \"taker\": \"{{TAKER}}\",\n  \"salt\": \"{{SALT}}\",\n  \"quote_mint\": \"{{QUOTE_MINT}}\",\n  \"quote_amount\": \"{{QUOTE_AMOUNT}}\",\n  \"bond_amount_usdc\": \"{{BOND_AMOUNT_USDC}}\",\n  \"taker_fee_bps\": \"{{TAKER_FEE_BPS}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{API_KEY}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "check (no key)",
+          "id": "c2b45cdd-090a-5c48-a273-f0401a3d2ded",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const authOn = (pm.variables.get(\"API_KEY\") || \"\").length > 0;",
+                  "",
+                  "if (authOn) {",
+                  "    pm.test(\"A request without a key is rejected with 401\", function () {",
+                  "        pm.response.to.have.status(401);",
+                  "    });",
+                  "    pm.test(\"WWW-Authenticate: Bearer challenge\", function () {",
+                  "        pm.expect(pm.response.headers.get(\"WWW-Authenticate\")).to.eql(\"Bearer\");",
+                  "    });",
+                  "    pm.test(\"JSON error envelope is exactly {error: Unauthorized}\", function () {",
+                  "        pm.expect(pm.response.json()).to.eql({ error: \"Unauthorized\" });",
+                  "    });",
+                  "    pm.test(\"No proof is issued\", function () {",
+                  "        pm.expect(pm.response.text()).to.not.include(\"liquidity_proof\");",
+                  "    });",
+                  "} else {",
+                  "    pm.test(\"API_KEY unset in this environment: /check is open (not 401)\", function () {",
+                  "        pm.expect(pm.response.code).to.not.eql(401);",
+                  "    });",
+                  "}",
+                  "",
+                  "pm.test(\"CORS header present on the 401 too (browser can read the error)\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"Access-Control-Allow-Origin\")).to.eql(\"*\");",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Origin",
+                "value": "https://app.unleak.trade"
+              }
+            ],
+            "url": {
+              "raw": "{{API_URL}}/check",
+              "host": [
+                "{{API_URL}}"
+              ],
+              "path": [
+                "check"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"rfq\": \"{{RFQ}}\",\n  \"taker\": \"{{TAKER}}\",\n  \"salt\": \"{{SALT}}\",\n  \"quote_mint\": \"{{QUOTE_MINT}}\",\n  \"quote_amount\": \"{{QUOTE_AMOUNT}}\",\n  \"bond_amount_usdc\": \"{{BOND_AMOUNT_USDC}}\",\n  \"taker_fee_bps\": \"{{TAKER_FEE_BPS}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          }
+        },
+        {
+          "name": "check (wrong key)",
+          "id": "57122082-8b05-57c1-abab-dcdb196be4d6",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const authOn = (pm.variables.get(\"API_KEY\") || \"\").length > 0;",
+                  "",
+                  "if (authOn) {",
+                  "    pm.test(\"A wrong key is rejected with 401\", function () {",
+                  "        pm.response.to.have.status(401);",
+                  "    });",
+                  "    pm.test(\"WWW-Authenticate: Bearer challenge\", function () {",
+                  "        pm.expect(pm.response.headers.get(\"WWW-Authenticate\")).to.eql(\"Bearer\");",
+                  "    });",
+                  "    pm.test(\"JSON error envelope is exactly {error: Unauthorized}\", function () {",
+                  "        pm.expect(pm.response.json()).to.eql({ error: \"Unauthorized\" });",
+                  "    });",
+                  "    pm.test(\"No proof is issued\", function () {",
+                  "        pm.expect(pm.response.text()).to.not.include(\"liquidity_proof\");",
+                  "    });",
+                  "} else {",
+                  "    pm.test(\"API_KEY unset in this environment: /check is open (not 401)\", function () {",
+                  "        pm.expect(pm.response.code).to.not.eql(401);",
+                  "    });",
+                  "}",
+                  "",
+                  "pm.test(\"CORS header present on the 401 too (browser can read the error)\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"Access-Control-Allow-Origin\")).to.eql(\"*\");",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Origin",
+                "value": "https://app.unleak.trade"
+              },
+              {
+                "key": "X-API-Key",
+                "value": "not-a-valid-key-{{$randomUUID}}"
+              }
+            ],
+            "url": {
+              "raw": "{{API_URL}}/check",
+              "host": [
+                "{{API_URL}}"
+              ],
+              "path": [
+                "check"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"rfq\": \"{{RFQ}}\",\n  \"taker\": \"{{TAKER}}\",\n  \"salt\": \"{{SALT}}\",\n  \"quote_mint\": \"{{QUOTE_MINT}}\",\n  \"quote_amount\": \"{{QUOTE_AMOUNT}}\",\n  \"bond_amount_usdc\": \"{{BOND_AMOUNT_USDC}}\",\n  \"taker_fee_bps\": \"{{TAKER_FEE_BPS}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          }
+        },
+        {
+          "name": "check (no key, invalid body)",
+          "id": "87b6eac0-33ad-581e-ac2e-7a03efca6fee",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// The key is checked before the body is parsed: no validation detail leaks to",
+                  "// unauthenticated callers.",
+                  "const authOn = (pm.variables.get(\"API_KEY\") || \"\").length > 0;",
+                  "",
+                  "if (authOn) {",
+                  "    pm.test(\"An invalid body without a key is rejected with 401\", function () {",
+                  "        pm.response.to.have.status(401);",
+                  "    });",
+                  "    pm.test(\"WWW-Authenticate: Bearer challenge\", function () {",
+                  "        pm.expect(pm.response.headers.get(\"WWW-Authenticate\")).to.eql(\"Bearer\");",
+                  "    });",
+                  "    pm.test(\"JSON error envelope is exactly {error: Unauthorized}\", function () {",
+                  "        pm.expect(pm.response.json()).to.eql({ error: \"Unauthorized\" });",
+                  "    });",
+                  "    pm.test(\"No proof is issued\", function () {",
+                  "        pm.expect(pm.response.text()).to.not.include(\"liquidity_proof\");",
+                  "    });",
+                  "} else {",
+                  "    pm.test(\"API_KEY unset in this environment: /check is open (not 401)\", function () {",
+                  "        pm.expect(pm.response.code).to.not.eql(401);",
+                  "    });",
+                  "}",
+                  "",
+                  "pm.test(\"CORS header present on the 401 too (browser can read the error)\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"Access-Control-Allow-Origin\")).to.eql(\"*\");",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Origin",
+                "value": "https://app.unleak.trade"
+              }
+            ],
+            "url": {
+              "raw": "{{API_URL}}/check",
+              "host": [
+                "{{API_URL}}"
+              ],
+              "path": [
+                "check"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"rfq\": \"not-a-pubkey\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          }
+        },
+        {
+          "name": "check (invalid salt)",
+          "id": "9144483a-a7f1-5843-9166-d2fa173cbfe8",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Flip the last byte of the valid salt: same length, invalid signature.",
+                  "const salt = pm.variables.get(\"SALT\");",
+                  "const last = (parseInt(salt.slice(-2), 16) ^ 0xff).toString(16).padStart(2, \"0\");",
+                  "pm.variables.set(\"BAD_SALT\", salt.slice(0, -2) + last);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Authenticated request whose salt is not the taker's signature of the RFQ.",
+                  "pm.test(\"Status code is 400\", function () {",
+                  "    pm.response.to.have.status(400);",
+                  "});",
+                  "",
+                  "pm.test(\"Error explains the salt was rejected\", function () {",
+                  "    pm.expect(pm.response.json().error).to.match(/salt/i);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Origin",
+                "value": "https://app.unleak.trade"
+              },
+              {
+                "key": "X-API-Key",
+                "value": "{{API_KEY}}"
+              }
+            ],
+            "url": {
+              "raw": "{{API_URL}}/check",
+              "host": [
+                "{{API_URL}}"
+              ],
+              "path": [
+                "check"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"rfq\": \"{{RFQ}}\",\n  \"taker\": \"{{TAKER}}\",\n  \"salt\": \"{{BAD_SALT}}\",\n  \"quote_mint\": \"{{QUOTE_MINT}}\",\n  \"quote_amount\": \"{{QUOTE_AMOUNT}}\",\n  \"bond_amount_usdc\": \"{{BOND_AMOUNT_USDC}}\",\n  \"taker_fee_bps\": \"{{TAKER_FEE_BPS}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "metrics",
+      "id": "42d645cd-785b-5f50-977f-4d2b254196e1",
+      "description": "`GET /metrics` \u2014 `METRICS_TOKEN` or an API key.",
+      "item": [
+        {
+          "name": "metrics",
+          "id": "3f6b0c1e-8d2a-4b7e-9c41-5a2e7d9f1b01",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Warm-up: HTTP metric families are created lazily on the first served request,",
+                  "// so a scrape right after a dyno restart would only show the RPC counter.",
+                  "pm.sendRequest(pm.variables.get(\"API_URL\") + \"/health\", function (err) {",
+                  "    if (err) { console.warn(\"warm-up /health failed:\", err); }",
+                  "});"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Bearer METRICS_TOKEN. /metrics accepts METRICS_TOKEN or any API key; it is open",
+                  "// only when neither METRICS_TOKEN nor API_KEYS is configured on the server.",
+                  "const token = pm.variables.get(\"METRICS_TOKEN\") || \"\";",
+                  "const apiKey = pm.variables.get(\"API_KEY\") || \"\";",
+                  "if (!token && apiKey) {",
+                  "    pm.test(\"No METRICS_TOKEN but API keys are set: 401 without a credential\", function () {",
+                  "        pm.response.to.have.status(401);",
+                  "    });",
+                  "} else {",
+                  "    pm.test(\"Status code is 200\", function () {",
+                  "        pm.response.to.have.status(200);",
+                  "    });",
+                  "",
+                  "    pm.test(\"Content-Type is Prometheus text format\", function () {",
+                  "        pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"text/plain\");",
+                  "    });",
+                  "",
+                  "    const body = pm.response.text();",
+                  "",
+                  "    pm.test(\"HTTP request counter is exposed\", function () {",
+                  "        pm.expect(body).to.include(\"# TYPE liquidity_guard_http_requests_total counter\");",
+                  "    });",
+                  "",
+                  "    pm.test(\"HTTP latency histogram is exposed\", function () {",
+                  "        pm.expect(body).to.include(\"liquidity_guard_http_requests_duration_seconds_bucket\");",
+                  "    });",
+                  "",
+                  "    pm.test(\"RPC counter is exposed with primary/fallback series\", function () {",
+                  "        pm.expect(body).to.include(\"# TYPE liquidity_guard_rpc_requests_total counter\");",
+                  "        pm.expect(body).to.match(/liquidity_guard_rpc_requests_total\\{[^}]*target=\"primary\"/);",
+                  "        pm.expect(body).to.match(/liquidity_guard_rpc_requests_total\\{[^}]*target=\"fallback\"/);",
+                  "    });",
+                  "",
+                  "    pm.test(\"/metrics does not count itself\", function () {",
+                  "        pm.expect(body).to.not.include('endpoint=\"/metrics\"');",
+                  "    });",
+                  "",
+                  "    pm.test(\"X-Request-Id header present\", function () {",
+                  "        pm.expect(pm.response.headers.has(\"X-Request-Id\")).to.be.true;",
+                  "    });",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{API_URL}}/metrics",
+              "host": [
+                "{{API_URL}}"
+              ],
+              "path": [
+                "metrics"
+              ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{METRICS_TOKEN}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "metrics (API key)",
+          "id": "11bbecbf-68dc-51a3-83cc-143b8dfefcc1",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Warm-up: HTTP metric families are created lazily on the first served request,",
+                  "// so a scrape right after a dyno restart would only show the RPC counter.",
+                  "pm.sendRequest(pm.variables.get(\"API_URL\") + \"/health\", function (err) {",
+                  "    if (err) { console.warn(\"warm-up /health failed:\", err); }",
+                  "});"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// An API key is accepted on /metrics as an alternative to METRICS_TOKEN.",
+                  "const apiKey = pm.variables.get(\"API_KEY\") || \"\";",
+                  "const token = pm.variables.get(\"METRICS_TOKEN\") || \"\";",
+                  "if (!apiKey && token) {",
+                  "    pm.test(\"API_KEY unset but METRICS_TOKEN set: 401 without the token\", function () {",
+                  "        pm.response.to.have.status(401);",
+                  "    });",
+                  "} else {",
+                  "    pm.test(\"Status code is 200\", function () {",
+                  "        pm.response.to.have.status(200);",
+                  "    });",
+                  "",
+                  "    pm.test(\"Content-Type is Prometheus text format\", function () {",
+                  "        pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"text/plain\");",
+                  "    });",
+                  "",
+                  "    const body = pm.response.text();",
+                  "",
+                  "    pm.test(\"HTTP request counter is exposed\", function () {",
+                  "        pm.expect(body).to.include(\"# TYPE liquidity_guard_http_requests_total counter\");",
+                  "    });",
+                  "",
+                  "    pm.test(\"HTTP latency histogram is exposed\", function () {",
+                  "        pm.expect(body).to.include(\"liquidity_guard_http_requests_duration_seconds_bucket\");",
+                  "    });",
+                  "",
+                  "    pm.test(\"RPC counter is exposed with primary/fallback series\", function () {",
+                  "        pm.expect(body).to.include(\"# TYPE liquidity_guard_rpc_requests_total counter\");",
+                  "        pm.expect(body).to.match(/liquidity_guard_rpc_requests_total\\{[^}]*target=\"primary\"/);",
+                  "        pm.expect(body).to.match(/liquidity_guard_rpc_requests_total\\{[^}]*target=\"fallback\"/);",
+                  "    });",
+                  "",
+                  "    pm.test(\"/metrics does not count itself\", function () {",
+                  "        pm.expect(body).to.not.include('endpoint=\"/metrics\"');",
+                  "    });",
+                  "",
+                  "    pm.test(\"X-Request-Id header present\", function () {",
+                  "        pm.expect(pm.response.headers.has(\"X-Request-Id\")).to.be.true;",
+                  "    });",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{API_KEY}}"
+              }
+            ],
+            "url": {
+              "raw": "{{API_URL}}/metrics",
+              "host": [
+                "{{API_URL}}"
+              ],
+              "path": [
+                "metrics"
+              ]
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          }
+        },
+        {
+          "name": "metrics (no token)",
+          "id": "7a1d4e92-c3b5-4f08-a6d7-2e9b8c4f5a02",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const isProtected = (pm.variables.get(\"METRICS_TOKEN\") || \"\").length > 0 ||",
+                  "    (pm.variables.get(\"API_KEY\") || \"\").length > 0;",
+                  "",
+                  "if (isProtected) {",
+                  "    pm.test(\"Without a credential /metrics is 401\", function () {",
+                  "        pm.response.to.have.status(401);",
+                  "    });",
+                  "    pm.test(\"WWW-Authenticate: Bearer challenge\", function () {",
+                  "        pm.expect(pm.response.headers.get(\"WWW-Authenticate\")).to.eql(\"Bearer\");",
+                  "    });",
+                  "    pm.test(\"No metric leaks in the 401 body\", function () {",
+                  "        pm.expect(pm.response.text()).to.not.include(\"liquidity_guard_\");",
+                  "    });",
+                  "} else {",
+                  "    pm.test(\"METRICS_TOKEN and API_KEY unset in this environment: /metrics is open (200)\", function () {",
+                  "        pm.response.to.have.status(200);",
+                  "    });",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{API_URL}}/metrics",
+              "host": [
+                "{{API_URL}}"
+              ],
+              "path": [
+                "metrics"
+              ]
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          }
+        },
+        {
+          "name": "metrics (wrong key)",
+          "id": "b3a51484-f610-5b62-9001-ce4b9464b852",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const isProtected = (pm.variables.get(\"METRICS_TOKEN\") || \"\").length > 0 ||",
+                  "    (pm.variables.get(\"API_KEY\") || \"\").length > 0;",
+                  "if (isProtected) {",
+                  "    pm.test(\"A wrong X-API-Key is 401\", function () {",
+                  "        pm.response.to.have.status(401);",
+                  "    });",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "not-a-valid-key-{{$randomUUID}}"
+              }
+            ],
+            "url": {
+              "raw": "{{API_URL}}/metrics",
+              "host": [
+                "{{API_URL}}"
+              ],
+              "path": [
+                "metrics"
+              ]
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "rpc",
+      "id": "878c0e4a-690a-597c-be18-e0880275b5e2",
+      "description": "Needs a reachable Solana RPC (excluded from the CI newman run).",
+      "item": [
+        {
+          "name": "ready",
+          "id": "7688ae71-e962-4149-bdf5-8d15a5ca06ce",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Unauthenticated (orchestrator readiness probe). Needs a reachable Solana RPC.",
+                  "pm.test(\"Status code is 200 (Solana RPC reachable)\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test(\"Status is ready\", function () {",
+                  "    pm.expect(pm.response.json().status).to.eql(\"ready\");",
+                  "});",
+                  "",
+                  "pm.test(\"X-Request-Id header present\", function () {",
+                  "    pm.expect(pm.response.headers.has(\"X-Request-Id\")).to.be.true;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{API_URL}}/ready",
+              "host": [
+                "{{API_URL}}"
+              ],
+              "path": [
+                "ready"
+              ]
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "LAST_COMMIT_HASH",
+      "value": ""
+    }
+  ]
+}
