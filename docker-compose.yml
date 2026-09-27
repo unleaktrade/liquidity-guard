@@ -21,6 +21,7 @@ services:
       # SOLANA_RPC_POOL_MAX_IDLE: 32
       # SKIP_FUND_CHECKS: 1
       # RATE_LIMIT: 1
+      # RATE_LIMIT_TRUST_PROXY: 1   # only behind a proxy that appends X-Forwarded-For
       # CORS: false 
       # CORS_MAX_AGE: 77
       # PORT: ${PORT:-8080}

@@ -1,6 +1,8 @@
 use actix_cors::Cors;
 use actix_governor::governor::middleware::NoOpMiddleware;
-use actix_governor::{Governor, GovernorConfig, GovernorConfigBuilder, PeerIpKeyExtractor};
+use actix_governor::{
+    Governor, GovernorConfig, GovernorConfigBuilder, KeyExtractor, SimpleKeyExtractionError,
+};
 use actix_web::body::MessageBody;
 use actix_web::dev::{ServiceRequest, ServiceResponse};
 use actix_web::http::header::{HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
@@ -93,6 +95,7 @@ struct Config {
     rpc: RpcSettings,
     skip_fund_checks: bool,
     rate_limit: bool,
+    rate_limit_trust_proxy: bool,
     cors_enabled: bool,
     cors_max_age: usize,
     port: String,
@@ -253,6 +256,7 @@ impl Config {
             rpc,
             skip_fund_checks: flag_on(get("SKIP_FUND_CHECKS").as_deref()),
             rate_limit: flag_on(get("RATE_LIMIT").as_deref()),
+            rate_limit_trust_proxy: flag_on(get("RATE_LIMIT_TRUST_PROXY").as_deref()),
             // CORS: permissive by default (any origin/method/header). Set CORS=false to disable.
             cors_enabled: flag_not_off(get("CORS").as_deref()),
             cors_max_age: get("CORS_MAX_AGE")
@@ -750,13 +754,74 @@ async fn ready(state: web::Data<AppState>) -> Result<HttpResponse> {
     }
 }
 
-type RateLimitConfig = GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>;
+/// Rate-limit key: the client IP address, with IPv6 collapsed to its /56
+/// prefix (customers usually own a whole prefix), like actix-governor's
+/// `PeerIpKeyExtractor`.
+///
+/// Behind a reverse proxy (Heroku's router) the TCP peer is the proxy, so a
+/// peer-keyed limiter throttles all users together, or nobody at all when the
+/// proxy spreads connections over many addresses. With `trust_proxy`, the key
+/// is the **last** `X-Forwarded-For` entry: the address the trusted proxy
+/// itself appended. Earlier entries are client-controlled and ignored, so a
+/// client cannot pick its own bucket. Only enable it when every request comes
+/// through such a proxy; without the header the peer address is used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ClientIpKeyExtractor {
+    trust_proxy: bool,
+}
 
-/// Per-IP rate limiter: 2 req/s sustained, burst of 5.
-fn rate_limit_config() -> RateLimitConfig {
+static X_FORWARDED_FOR: HeaderName = HeaderName::from_static("x-forwarded-for");
+
+impl ClientIpKeyExtractor {
+    fn forwarded_ip(req: &ServiceRequest) -> Option<std::net::IpAddr> {
+        req.headers()
+            .get_all(&X_FORWARDED_FOR)
+            .last()?
+            .to_str()
+            .ok()?
+            .rsplit(',')
+            .next()?
+            .trim()
+            .parse()
+            .ok()
+    }
+
+    fn client_ip(&self, req: &ServiceRequest) -> Option<std::net::IpAddr> {
+        self.trust_proxy
+            .then(|| Self::forwarded_ip(req))
+            .flatten()
+            .or_else(|| req.peer_addr().map(|addr| addr.ip()))
+    }
+}
+
+impl KeyExtractor for ClientIpKeyExtractor {
+    type Key = std::net::IpAddr;
+    type KeyExtractionError = SimpleKeyExtractionError<&'static str>;
+
+    fn extract(&self, req: &ServiceRequest) -> Result<Self::Key, Self::KeyExtractionError> {
+        let ip = self.client_ip(req).ok_or_else(|| {
+            SimpleKeyExtractionError::new("Could not extract the client IP address")
+        })?;
+        Ok(match ip {
+            std::net::IpAddr::V6(v6) => {
+                let mut octets = v6.octets();
+                octets[7..].fill(0);
+                std::net::IpAddr::V6(octets.into())
+            }
+            v4 => v4,
+        })
+    }
+}
+
+type RateLimitConfig = GovernorConfig<ClientIpKeyExtractor, NoOpMiddleware>;
+
+/// Per-client-IP rate limiter: one request every 2 s sustained (0.5 req/s),
+/// burst of 5. See `ClientIpKeyExtractor` for how the client IP is found.
+fn rate_limit_config(trust_proxy: bool) -> RateLimitConfig {
     GovernorConfigBuilder::default()
         .seconds_per_request(2)
         .burst_size(5)
+        .key_extractor(ClientIpKeyExtractor { trust_proxy })
         .finish()
         .expect("invalid governor config")
 }
@@ -1087,7 +1152,15 @@ async fn main() -> std::io::Result<()> {
     let bind = format!("0.0.0.0:{}", config.port);
 
     // Built once so every worker shares the same per-IP quota.
-    let governor_conf = config.rate_limit.then(rate_limit_config);
+    let governor_conf = config
+        .rate_limit
+        .then(|| rate_limit_config(config.rate_limit_trust_proxy));
+    if config.rate_limit {
+        info!(
+            trust_proxy = config.rate_limit_trust_proxy,
+            "Rate limiting /check and /ready per client IP"
+        );
+    }
     let cors_enabled = config.cors_enabled;
     let cors_max_age = config.cors_max_age;
 
@@ -1501,6 +1574,7 @@ mod tests {
                 rpc: RpcSettings::default(),
                 skip_fund_checks: false,
                 rate_limit: false,
+                rate_limit_trust_proxy: false,
                 cors_enabled: true,
                 cors_max_age: 3600,
                 port: "8080".into(),
@@ -1538,6 +1612,7 @@ mod tests {
             ("SOLANA_RPC_POOL_MAX_IDLE", "4"),
             ("SKIP_FUND_CHECKS", "TRUE"),
             ("RATE_LIMIT", "1"),
+            ("RATE_LIMIT_TRUST_PROXY", "true"),
             ("CORS", "0"),
             ("CORS_MAX_AGE", "77"),
             ("PORT", "9000"),
@@ -1551,6 +1626,7 @@ mod tests {
         assert_eq!(c.rpc.timeout, Duration::from_secs(7));
         assert_eq!(c.rpc.pool_max_idle_per_host, 4);
         assert!(c.skip_fund_checks && c.rate_limit && !c.cors_enabled);
+        assert!(c.rate_limit_trust_proxy);
         assert_eq!(c.cors_max_age, 77);
         assert_eq!(c.port, "9000");
     }
@@ -2055,7 +2131,7 @@ mod tests {
     async fn rate_limit_applies_to_check_and_ready_only() {
         let fx = Fixture::new();
         let state = fx.state(SolanaRpc::new(&dead_url(), None, &fast_settings()), true);
-        let gov = rate_limit_config();
+        let gov = rate_limit_config(false);
         let app = app!(state, Some(&gov));
         let body = fx.body(1, 1, "0");
         for i in 0..5 {
@@ -2090,7 +2166,7 @@ mod tests {
     async fn cors_preflight_bypasses_rate_limiter() {
         let fx = Fixture::new();
         let state = fx.state(SolanaRpc::new(&dead_url(), None, &fast_settings()), true);
-        let gov = rate_limit_config();
+        let gov = rate_limit_config(false);
         let app = atest::init_service(
             App::new()
                 .wrap(build_cors(true, 77))
@@ -2396,7 +2472,7 @@ mod tests {
         let fx = Fixture::new();
         let obs = observed(None);
         let state = fx.state(SolanaRpc::new(&dead_url(), None, &fast_settings()), false);
-        let gov = rate_limit_config();
+        let gov = rate_limit_config(false);
         let app = full_app!(state, obs, Some(&gov));
         let body = fx.body(1, 1, "0");
         for _ in 0..6 {
@@ -2445,7 +2521,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("liquidity_guard_rpc_requests_total"));
         // The endpoint is not rate limited, even with the governor on.
-        let gov = rate_limit_config();
+        let gov = rate_limit_config(false);
         let app = full_app!(state, obs, Some(&gov));
         for _ in 0..10 {
             assert_eq!(scrape(&app, Some("Bearer s3cret")).await.0, StatusCode::OK);
@@ -2751,7 +2827,7 @@ mod tests {
             true,
             &["k"],
         );
-        let gov = rate_limit_config();
+        let gov = rate_limit_config(false);
         let app = app!(state, Some(&gov));
         let body = fx.body(1, 1, "0");
         // Unauthenticated attempts consume the per-IP quota (throttles key guessing)...
@@ -2775,7 +2851,7 @@ mod tests {
             true,
             &["k"],
         );
-        let gov = rate_limit_config();
+        let gov = rate_limit_config(false);
         let app = full_app!(state, obs, Some(&gov));
         let req = atest::TestRequest::default()
             .method(actix_web::http::Method::OPTIONS)
@@ -2899,5 +2975,126 @@ mod tests {
             .map(|l| l["status"].as_u64().unwrap())
             .collect();
         assert_eq!(statuses, [401, 401, 200]);
+    }
+
+    // ---------- rate-limit client IP ----------
+
+    fn key_for(trust_proxy: bool, peer: Option<&str>, xff: &[&str]) -> Option<String> {
+        let mut req = atest::TestRequest::get().uri("/ready");
+        if let Some(p) = peer {
+            req = req.peer_addr(p.parse().unwrap());
+        }
+        for v in xff {
+            req = req.append_header(("X-Forwarded-For", *v));
+        }
+        ClientIpKeyExtractor { trust_proxy }
+            .extract(&req.to_srv_request())
+            .ok()
+            .map(|ip| ip.to_string())
+    }
+
+    #[test]
+    fn client_ip_key_extraction() {
+        let peer = Some("10.0.0.1:1234");
+        // Trust off: the header is ignored, the peer is the key.
+        assert_eq!(
+            key_for(false, peer, &["1.2.3.4"]).as_deref(),
+            Some("10.0.0.1")
+        );
+        // Trust on: the proxy-appended (last) entry wins; spoofed earlier ones are ignored.
+        assert_eq!(
+            key_for(true, peer, &["1.2.3.4"]).as_deref(),
+            Some("1.2.3.4")
+        );
+        assert_eq!(
+            key_for(true, peer, &["6.6.6.6, 1.2.3.4"]).as_deref(),
+            Some("1.2.3.4")
+        );
+        assert_eq!(
+            key_for(true, peer, &["6.6.6.6", "7.7.7.7,1.2.3.4"]).as_deref(),
+            Some("1.2.3.4")
+        );
+        // Missing or malformed header: fall back to the peer.
+        assert_eq!(key_for(true, peer, &[]).as_deref(), Some("10.0.0.1"));
+        assert_eq!(
+            key_for(true, peer, &["1.2.3.4, garbage"]).as_deref(),
+            Some("10.0.0.1")
+        );
+        // IPv6 is keyed per /56 prefix, whether it comes from the header or the peer.
+        assert_eq!(
+            key_for(true, peer, &["2001:db8:aa:bbcc:1:2:3:4"]).as_deref(),
+            Some("2001:db8:aa:bb00::")
+        );
+        assert_eq!(
+            key_for(false, Some("[2001:db8:aa:bbff::9]:443"), &[]).as_deref(),
+            Some("2001:db8:aa:bb00::")
+        );
+        // No peer and no usable header: extraction fails (the Governor then answers 500).
+        assert_eq!(key_for(true, None, &[]), None);
+    }
+
+    async fn ready_as<B: actix_web::body::MessageBody>(
+        app: &impl actix_web::dev::Service<
+            actix_http::Request,
+            Response = actix_web::dev::ServiceResponse<B>,
+            Error = actix_web::Error,
+        >,
+        xff: &str,
+    ) -> StatusCode {
+        let req = atest::TestRequest::get()
+            .uri("/ready")
+            // Every request arrives from the same proxy address, as on Heroku.
+            .peer_addr("10.1.1.1:5000".parse().unwrap())
+            .insert_header(("X-Forwarded-For", xff))
+            .to_request();
+        atest::call_service(app, req).await.status()
+    }
+
+    #[actix_web::test]
+    async fn rate_limit_behind_proxy_is_per_client() {
+        let fx = Fixture::new();
+        let state = fx.state(
+            SolanaRpc::new(&start_mock(Mock::new(Mode::Ok)), None, &fast_settings()),
+            true,
+        );
+        let gov = rate_limit_config(true);
+        let app = app!(state, Some(&gov));
+        for i in 0..5 {
+            assert_eq!(
+                ready_as(&app, "1.1.1.1").await,
+                StatusCode::OK,
+                "client A request {i}"
+            );
+        }
+        assert_eq!(
+            ready_as(&app, "1.1.1.1").await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        // A spoofed leading entry does not move client A to a fresh bucket.
+        assert_eq!(
+            ready_as(&app, "9.9.9.9, 1.1.1.1").await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        // Client B, same proxy, has its own quota.
+        assert_eq!(ready_as(&app, "2.2.2.2").await, StatusCode::OK);
+    }
+
+    #[actix_web::test]
+    async fn rate_limit_without_trust_ignores_forwarded_for() {
+        let fx = Fixture::new();
+        let state = fx.state(
+            SolanaRpc::new(&start_mock(Mock::new(Mode::Ok)), None, &fast_settings()),
+            true,
+        );
+        let gov = rate_limit_config(false);
+        let app = app!(state, Some(&gov));
+        // Different X-Forwarded-For values cannot escape the peer's bucket.
+        for i in 0..5 {
+            assert_eq!(ready_as(&app, &format!("3.3.3.{i}")).await, StatusCode::OK);
+        }
+        assert_eq!(
+            ready_as(&app, "4.4.4.4").await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
     }
 }

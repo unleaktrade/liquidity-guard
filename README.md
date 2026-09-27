@@ -47,7 +47,7 @@ Validation rules:
 curl -X POST "$API_URL/check" -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" -d @check.json
 ```
 
-Keys sent by a browser app are visible to anyone who opens the app: treat those as revocable client identifiers, give each consumer its own key and keep `RATE_LIMIT=1` on browser-facing instances.
+Keys sent by a browser app are visible to anyone who opens the app: treat those as revocable client identifiers, give each consumer its own key and keep `RATE_LIMIT=1` (with `RATE_LIMIT_TRUST_PROXY=1` on Heroku) on browser-facing instances.
 
 ### Check - Request example
 
@@ -120,7 +120,8 @@ Environment variables:
 | `SOLANA_RPC_TIMEOUT_SECS` | No | `10` | Per-request RPC timeout (connect timeout is `min(5, value)`) |
 | `SOLANA_RPC_POOL_MAX_IDLE` | No | `32` | Max idle keep-alive connections per RPC host |
 | `SKIP_FUND_CHECKS` | No | `false` | Skip on-chain balance checks (CI/CD) |
-| `RATE_LIMIT` | No | `false` | Per-IP rate limit on `/ready` and `/check` (2 req/s sustained, burst 5) |
+| `RATE_LIMIT` | No | `false` | Per-client-IP rate limit on `/ready` and `/check`: one request every 2 s sustained (0.5 req/s), burst 5; `429` with a plain-text body when exceeded |
+| `RATE_LIMIT_TRUST_PROXY` | No | `false` | Key the rate limiter on the client IP from the last `X-Forwarded-For` entry (the one the proxy appends) instead of the TCP peer. **Required on Heroku**, where the peer is the router, so without it the limiter does not limit per user. Only enable behind a proxy that always appends that header |
 | `CORS` | No | `true` | Enable permissive CORS (`Access-Control-Allow-Origin: *`, any method/header, no credentials). Set to `false` or `0` to disable. |
 | `CORS_MAX_AGE` | No | `3600` | Preflight cache duration in seconds |
 | `PORT` | No | `8080` | HTTP listen port |
