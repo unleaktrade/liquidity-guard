@@ -121,7 +121,7 @@ impl ApiKeys {
         for k in list
             .unwrap_or("")
             .split(',')
-            .chain(single.into_iter())
+            .chain(single)
             .map(str::trim)
             .filter(|k| !k.is_empty())
         {
