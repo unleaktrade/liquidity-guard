@@ -87,13 +87,13 @@ Keys sent by a browser app are visible to anyone who opens the app: treat those 
 ## Development
 
 - Tests: `cargo test` (unit tests plus HTTP and RPC tests against an in-process mock JSON-RPC server; no network needed)
-- Postman: `postman/liquidity-guard.postman_collection.json` (same collection as the team workspace; folders `public`, `check`, `metrics`, `rpc`). CI runs it with newman against an ephemeral local instance:
+- Postman: `postman/liquidity-guard.postman_collection.json` (same collection as the team workspace). CI runs it with newman against an ephemeral local instance:
 
   ```sh
   cargo run --example postman_env -- /tmp/pm          # fresh keys + a valid /check fixture
   (set -a; . /tmp/pm/server.env; set +a; cargo run) &
   npx newman run postman/liquidity-guard.postman_collection.json \
-    -e /tmp/pm/postman_environment.json --folder public --folder check --folder metrics
+    -e /tmp/pm/postman_environment.json
   ```
 
   Against a deployed instance, use the workspace environments and set `API_KEY` / `METRICS_TOKEN` there (empty `API_KEY` = the instance runs without keys).

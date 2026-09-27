@@ -28,8 +28,8 @@ jobs:
 
   # Runs the Postman collection (postman/) with newman against a locally started
   # instance: ephemeral keys from `cargo run --example postman_env`, API keys and
-  # METRICS_TOKEN on, SKIP_FUND_CHECKS so /check needs no RPC. The `rpc` folder
-  # (/ready) is skipped because it needs a live Solana RPC.
+  # METRICS_TOKEN on, SKIP_FUND_CHECKS so /check needs no RPC. The RPC URL points
+  # nowhere, so the `ready` request asserts 503 (EXPECT_READY_STATUS).
   newman:
     runs-on: ubuntu-latest
     steps:
@@ -58,7 +58,6 @@ jobs:
         run: >-
           npx --yes newman@6 run postman/liquidity-guard.postman_collection.json
           -e "$RUNNER_TEMP/pm/postman_environment.json"
-          --folder public --folder check --folder metrics
       - name: Server log
         if: always()
         run: cat "$RUNNER_TEMP/pm/server.log" || true

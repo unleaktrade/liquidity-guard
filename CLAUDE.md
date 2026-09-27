@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Compose: `docker compose up --build`
 
 - Test: `cargo test` (all tests live in `#[cfg(test)] mod tests` in `src/main.rs`; RPC behaviour is tested against an in-process actix mock JSON-RPC server, so no network is needed). Coverage: `cargo llvm-cov --summary-only`.
-- CI (`.github/workflows/ci.yml`) runs fmt, clippy and tests on every push/PR, plus a `newman` job that runs the Postman collection (`postman/liquidity-guard.postman_collection.json`) against a local instance started with ephemeral fixtures from `cargo run --example postman_env -- <dir>` (folders `public`, `check`, `metrics`; `rpc` needs a live RPC). The collection is mirrored in the team Postman workspace (`unleaktrade-liquidity-guard`); keep both in sync.
+- CI (`.github/workflows/ci.yml`) runs fmt, clippy and tests on every push/PR, plus a `newman` job that runs the Postman collection (`postman/liquidity-guard.postman_collection.json`) against a local instance started with ephemeral fixtures from `cargo run --example postman_env -- <dir>` (the whole collection; `ready` asserts 503 there since no RPC is reachable). Keep the collection flat: the Postman API/MCP only keeps scripts on top-level requests. The collection is mirrored in the team Postman workspace (`unleaktrade-liquidity-guard`); keep both in sync.
 - Log assertions in tests go through `capture_json_logs()` (one process-wide subscriber, per-thread buffers). Do not use `tracing::subscriber::set_default` in tests: tracing's global interest/max-level caches race across parallel test threads and intermittently drop events.
 
 ## Architecture

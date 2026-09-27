@@ -71,6 +71,8 @@ fn main() {
             var("API_KEY", api_key, true),
             var("METRICS_TOKEN", metrics_token, true),
             var("EXPECT_CHECK_STATUS", "200", false),
+            // SOLANA_RPC_URL points nowhere, so /ready must report 503.
+            var("EXPECT_READY_STATUS", "503", false),
             var("RFQ", rfq.to_string(), false),
             var("TAKER", taker.pubkey().to_string(), false),
             var("SALT", salt, false),
