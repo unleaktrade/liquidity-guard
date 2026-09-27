@@ -14,11 +14,14 @@ Use the service output in a Solana preflight instruction that verifies the hash 
 - GET `/health`  
   Returns service status, configured network (`devnet`, `mainnet`, `localnet`), and the Ed25519 public key used to verify signatures.
 
+- GET `/ready`  
+  Readiness probe: `200` when the Solana RPC answers, `503` otherwise. Unauthenticated.
+
 - GET `/metrics`  
-  Prometheus metrics (text format). Protected by `METRICS_TOKEN` when set.
+  Prometheus metrics (text format). Protected by `METRICS_TOKEN` and/or `API_KEYS` when set (either credential works).
 
 - POST `/check`  
-  Validates taker liquidity for the RFQ and responds with:
+  Requires an API key when `API_KEYS` is set (see [Authentication](#authentication)). Validates taker liquidity for the RFQ and responds with:
   - `commit_hash`: deterministic SHA-256 hash derived from RFQ fields
   - `liquidity_proof`: Ed25519 signature of `commit_hash` using the service key
   - Echoed request context and metadata (network, timestamp, service_pubkey)
@@ -29,6 +32,22 @@ Validation rules:
 - Quote token balance must cover `quote_amount` + protocol fee uplift
   - Uplift = `floor(quote_amount * taker_fee_bps / 10_000)`, minimum 1 when `taker_fee_bps > 0`
 - `taker_fee_bps` must not exceed 10,000 (100% in basis points)
+
+### Authentication
+
+`/check` and `/metrics` are protected by shared-secret API keys; `/health`, `/ready` and CORS preflights never are.
+
+- Configure one or more keys with `API_KEYS` (comma-separated, e.g. one per consumer so each can be rotated on its own) and/or `API_KEY` (single key). Leading/trailing spaces and empty entries are ignored. **When neither is set, authentication is disabled** and the service logs a `WARN` at startup.
+- Clients send the key as `X-API-Key: <key>` or `Authorization: Bearer <key>` (the scheme is case-sensitive). `X-API-Key` wins when both are present.
+- A missing or wrong key gets `401 Unauthorized` with `WWW-Authenticate: Bearer` and `{"error":"Unauthorized"}`. The key is checked before the body is parsed, so unauthenticated callers learn nothing about validation. The rate limiter (when `RATE_LIMIT` is on) runs first, so it also throttles key guessing.
+- Keys are compared through SHA-256 digests in constant time and never logged; rejected attempts log `API key rejected` with `reason` = `missing` | `invalid`.
+- `/metrics` accepts `METRICS_TOKEN` or any API key (as `Authorization: Bearer` or `X-API-Key`); it stays open only when neither is configured.
+
+```sh
+curl -X POST "$API_URL/check" -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" -d @check.json
+```
+
+Keys sent by a browser app are visible to anyone who opens the app: treat those as revocable client identifiers, give each consumer its own key and keep `RATE_LIMIT=1` on browser-facing instances.
 
 ### Check - Request example
 
@@ -68,6 +87,16 @@ Validation rules:
 ## Development
 
 - Tests: `cargo test` (unit tests plus HTTP and RPC tests against an in-process mock JSON-RPC server; no network needed)
+- Postman: `postman/liquidity-guard.postman_collection.json` (same collection as the team workspace). CI runs it with newman against an ephemeral local instance:
+
+  ```sh
+  cargo run --example postman_env -- /tmp/pm          # fresh keys + a valid /check fixture
+  (set -a; . /tmp/pm/server.env; set +a; cargo run) &
+  npx newman run postman/liquidity-guard.postman_collection.json \
+    -e /tmp/pm/postman_environment.json
+  ```
+
+  Against a deployed instance, use the workspace environments and set `API_KEY` / `METRICS_TOKEN` there (empty `API_KEY` = the instance runs without keys).
 - Lint: `cargo clippy --all-targets -- -D warnings`
 - Format: `cargo fmt`
 
@@ -97,7 +126,9 @@ Environment variables:
 | `PORT` | No | `8080` | HTTP listen port |
 | `LOG_FORMAT` | No | `json` | `json` (one JSON object per line) or `pretty` (human-readable, for local dev) |
 | `RUST_LOG` | No | `info` | Log filter, e.g. `info,liquidity_guard=debug` |
-| `METRICS_TOKEN` | No | — | When set, `GET /metrics` requires `Authorization: Bearer <token>`; when unset, `/metrics` is open |
+| `METRICS_TOKEN` | No | — | When set, `GET /metrics` requires `Authorization: Bearer <token>` (or an API key); open only when neither `METRICS_TOKEN` nor `API_KEYS` is set |
+| `API_KEYS` | No | — | Comma-separated API keys required on `POST /check` (and accepted on `/metrics`). Unset = no authentication |
+| `API_KEY` | No | — | Single API key, merged with `API_KEYS` |
 
 ## RPC resilience
 
@@ -129,7 +160,7 @@ Environment variables:
 1. Configure environment (.env) with network, RPC, signing key, and mints.  
 2. Build and run with Cargo or Docker.  
 3. Call `/health` to confirm network and retrieve the service public key.  
-4. Call `/check` with RFQ details; pass `commit_hash`, and `liquidity_proof` into your preflight program instruction (SOLANA).
+4. Call `/check` with RFQ details (and `X-API-Key` when `API_KEYS` is set); pass `commit_hash`, and `liquidity_proof` into your preflight program instruction (SOLANA).
 
 ## Hash Pre-Image
 
