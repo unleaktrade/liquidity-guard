@@ -6,16 +6,16 @@ A minimal REST microservice and Dockerized REST API that validates a taker’s l
 
 Use the service output in a Solana preflight instruction that verifies the hash and Ed25519 signature on‑chain before running the business logic. See also:
 
-- [experimental-preflight-sigcheck](https://github.com/unleaktrade/experimental-preflight-sigcheck)
-- [settlement-engine](https://github.com/unleaktrade/settlement-engine)
+- [settlement-engine](https://github.com/unleaktrade/settlement-engine): the program that verifies the proof in `commit_quote` and recomputes the hash in `reveal_quote`
+- [experimental-preflight-sigcheck](https://github.com/unleaktrade/experimental-preflight-sigcheck): the historical proof of concept of the Ed25519 preflight pattern (it does not implement this service's pre-image)
 
 ## Endpoints
 
 - GET `/health`  
-  Returns service status, configured network (`devnet`, `mainnet`, `localnet`), and the Ed25519 public key used to verify signatures.
+  Returns `{"status":"healthy","network":…,"service_pubkey":…,"timestamp":…,"skip_fund_checks":…}`: the configured network (`"Devnet"`, `"Mainnet"` or `"Localnet"`, capitalised), the Ed25519 public key used to verify signatures, and whether balance checks are disabled.
 
 - GET `/ready`  
-  Readiness probe: `200` when the Solana RPC answers, `503` otherwise. Unauthenticated.
+  Readiness probe: `200` `{"status":"ready"}` when the Solana RPC answers, `503` `{"error":"Service not ready"}` otherwise. Unauthenticated, but rate limited when `RATE_LIMIT` is on.
 
 - GET `/metrics`  
   Prometheus metrics (text format). Protected by `METRICS_TOKEN` and/or `API_KEYS` when set (either credential works).
@@ -28,10 +28,23 @@ Use the service output in a Solana preflight instruction that verifies the hash 
 
 Validation rules:
 
+- Every request field is a JSON **string** (amounts and `taker_fee_bps` in decimal)
+- `salt` must be 128 hex characters (64 bytes) and a valid **Ed25519 signature by `taker` over the 32 raw bytes of the `rfq` pubkey**; anything else is rejected with `400`. Clients obtain it with `signMessage(rfq.toBytes())`, which also makes it re-derivable at reveal time
 - USDC balance must cover `bond_amount_usdc`
 - Quote token balance must cover `quote_amount` + protocol fee uplift
   - Uplift = `floor(quote_amount * taker_fee_bps / 10_000)`, minimum 1 when `taker_fee_bps > 0`
 - `taker_fee_bps` must not exceed 10,000 (100% in basis points)
+- Balances are read from the taker's classic SPL-Token associated token accounts only (not Token-2022); a missing account counts as a zero balance. With `SKIP_FUND_CHECKS` no balance is read at all
+
+Error responses:
+
+| Status | When | Body |
+|---|---|---|
+| `400` | Invalid pubkey, amount or salt; fee above the cap; insufficient funds | JSON `{"error":…}` for the salt-signature, fee-cap and balance checks, plain text otherwise |
+| `401` | Missing or wrong API key (when `API_KEYS` is set) | `{"error":"Unauthorized"}` |
+| `413` | Body over 1024 bytes, **and any body that fails JSON deserialisation** (malformed JSON, missing field, non-string value) | plain text |
+| `429` | Rate limit exceeded (when `RATE_LIMIT` is on) | plain text |
+| `500` | Solana RPC failure during the balance check | `Internal server error` |
 
 ### Authentication
 
@@ -53,10 +66,10 @@ Keys sent by a browser app are visible to anyone who opens the app: treat those 
 
 ```json
 {
-  "rfq": "6p7BsnxWgNze6wLjhHD9wN6Zo7jEpoFZ9npCDPhsJK8H",
-  "taker": "8GAt381fturbi53tXBKubeKgXAdjKvu4fV7H9sn3z4pZ",
-  "salt": "50f8f2e8b2bdd78400b8f20d9e526be2b7aab3346fdd043d84b35ad6ef4a5791434f243f5d84835bacc0ebfe32ba71b117a5da1301bad9ec4e297c8835387c0d",
-  "quote_mint": "EoTybYbsuFWfe64MqMqVuVTNgHfQgK6xLu4fvnguy9dN",
+  "rfq": "Z6QxihLr3dihqPuPQk1TQsShYJcL7XoGoH1BafqejWA",
+  "taker": "Dfi6F1SxSQnpoPXtncwvu5BdzJw47NMY2mtgLGKAwiWC",
+  "salt": "0a439225c0fd8f11cacbc223a426ce485577c91b32f2e1ba6e3da082c896d4ccde6b4edb7bac9520427f8edb91a4be9f247feed2d2f554d7281d5bc646044704",
+  "quote_mint": "2BXfxddd6Mg9JAsNeqJMjg9URofaCTfzASCg6W8dMHYo",
   "quote_amount": "100000000",
   "bond_amount_usdc": "100000",
   "taker_fee_bps": "50"
@@ -67,22 +80,24 @@ Keys sent by a browser app are visible to anyone who opens the app: treat those 
 
 ```json
 {
-    "rfq": "6p7BsnxWgNze6wLjhHD9wN6Zo7jEpoFZ9npCDPhsJK8H",
-    "salt": "50f8f2e8b2bdd78400b8f20d9e526be2b7aab3346fdd043d84b35ad6ef4a5791434f243f5d84835bacc0ebfe32ba71b117a5da1301bad9ec4e297c8835387c0d",
-    "taker": "8GAt381fturbi53tXBKubeKgXAdjKvu4fV7H9sn3z4pZ",
-    "usdc_mint": "5jBqJmY2mKetudVa2XaC8U6UN2BNNirDiTnDEuA6pdyR",
-    "quote_mint": "EoTybYbsuFWfe64MqMqVuVTNgHfQgK6xLu4fvnguy9dN",
+    "rfq": "Z6QxihLr3dihqPuPQk1TQsShYJcL7XoGoH1BafqejWA",
+    "salt": "0a439225c0fd8f11cacbc223a426ce485577c91b32f2e1ba6e3da082c896d4ccde6b4edb7bac9520427f8edb91a4be9f247feed2d2f554d7281d5bc646044704",
+    "taker": "Dfi6F1SxSQnpoPXtncwvu5BdzJw47NMY2mtgLGKAwiWC",
+    "usdc_mint": "1117mWrzzrZr312ebPDHu8tbfMwFNvCvMbr6WepCNG",
+    "quote_mint": "2BXfxddd6Mg9JAsNeqJMjg9URofaCTfzASCg6W8dMHYo",
     "quote_amount": "100000000",
     "bond_amount_usdc": "100000",
     "taker_fee_bps": "50",
-    "service_pubkey": "5gfPFweV3zJovznZqBra3rv5tWJ5EHVzQY1PqvNA4HGg",
-    "commit_hash": "d3fbfcb128eea470df1b44faaa57f65f4d1009e9723dc22ea25b1be89ba103a2",
-    "liquidity_proof": "77fd13bc03761e59bef613a60d9bcd013d79d0b152fd28e24c60dfbe8bc3daeb40bda9b7d348ca05c544b16ae489fbd350dab85ed94e82d7c006562aa4352b0d",
-    "network": "Devnet",
+    "service_pubkey": "8RrQiPAfwvHaNRxpTYCJHcJnt3e5K2p3e35GzB7rM7hg",
+    "commit_hash": "85f529bd0a350976e6c4af0ebf9c3638ad09b6612ee03d90d42a1a4350be42f5",
+    "liquidity_proof": "d58b0cfc1e784182a21584a071c03e93b58e85eb88cdc42c1df7f995bbfdcf7e9b0a7600aa2121d7ed7bc82848123ca865fab5dc1b1b8bf8d6b1f9c965100b03",
+    "network": "Localnet",
     "skip_fund_checks": true,
-    "timestamp": 1763639964
+    "timestamp": 1791895507
 }
 ```
+
+Both examples come from one real call to a local instance started with throwaway keys (`cargo run --example postman_env`, `SKIP_FUND_CHECKS=true`, `SOLANA_NETWORK=localnet`), so `commit_hash` is the SHA-256 of the [pre-image](#hash-pre-image) built from these exact fields and `liquidity_proof` verifies against `service_pubkey`. A deployed instance answers with its own `service_pubkey`, `usdc_mint` and `network`.
 
 ## Development
 
@@ -108,13 +123,18 @@ Keys sent by a browser app are visible to anyone who opens the app: treat those 
 - Run:  
   `docker run -p 8080:8080 --env-file .env liquidity-guard`
 
+- Or with Compose (`docker-compose.yml`):  
+  `docker compose up --build`
+
+There is no `.env.example`: create `.env` from the table below. The image's `EXPOSE` and `HEALTHCHECK` hardcode port 8080, so a different `PORT` breaks the container health check.
+
 Environment variables:
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `SIGNING_KEY` | **Yes** | — | Base58-encoded keypair for Ed25519 signing |
 | `USDC_MINT` | **Yes** | — | Base58-encoded USDC mint pubkey |
-| `SOLANA_NETWORK` | No | — | `devnet`, `mainnet`, or `localnet` |
+| `SOLANA_NETWORK` | No | `devnet` | `devnet`, `mainnet` (or `mainnet-beta`), or `localnet`. An unrecognised value silently falls back to `devnet` |
 | `SOLANA_RPC_URL` | No | Derived from network | Solana RPC endpoint |
 | `SOLANA_RPC_FALLBACK` | No | `true` | Retry once on the network's public RPC when a custom `SOLANA_RPC_URL` fails. Set to `false` or `0` to disable. |
 | `SOLANA_RPC_TIMEOUT_SECS` | No | `10` | Per-request RPC timeout (connect timeout is `min(5, value)`) |
@@ -125,7 +145,7 @@ Environment variables:
 | `CORS` | No | `true` | Enable permissive CORS (`Access-Control-Allow-Origin: *`, any method/header, no credentials). Set to `false` or `0` to disable. |
 | `CORS_MAX_AGE` | No | `3600` | Preflight cache duration in seconds |
 | `PORT` | No | `8080` | HTTP listen port |
-| `LOG_FORMAT` | No | `json` | `json` (one JSON object per line) or `pretty` (human-readable, for local dev) |
+| `LOG_FORMAT` | No | `json` | `json` (one JSON object per line) or `pretty` / `text` (human-readable, for local dev) |
 | `RUST_LOG` | No | `info` | Log filter, e.g. `info,liquidity_guard=debug` |
 | `METRICS_TOKEN` | No | — | When set, `GET /metrics` requires `Authorization: Bearer <token>` (or an API key); open only when neither `METRICS_TOKEN` nor `API_KEYS` is set |
 | `API_KEYS` | No | — | Comma-separated API keys required on `POST /check` (and accepted on `/metrics`). Unset = no authentication |
@@ -139,7 +159,7 @@ Three Heroku apps run the Docker image (`heroku.yml`). Deploy by pushing `main` 
 |---|---|---|---|
 | devnet | `devnet` → `liquidity-guard-devnet` | must equal devnet `Config.liquidity_guard` | `API_KEYS`, `RATE_LIMIT=1`, `RATE_LIMIT_TRUST_PROXY=1` |
 | devnet, skip | `devnet_skip` → `liquidity-guard-devnet-skip` | test-only key (not in Config) | `API_KEYS`, `SKIP_FUND_CHECKS=1` |
-| mainnet | `heroku` → `liquidity-guard-mainnet` | must equal mainnet `Config.liquidity_guard` | `SOLANA_NETWORK=mainnet`, `API_KEYS`, `RATE_LIMIT=1`, `RATE_LIMIT_TRUST_PROXY=1` |
+| mainnet | `heroku` → `liquidity-guard-mainnet` | will have to equal mainnet `Config.liquidity_guard` (the settlement-engine program is not deployed on mainnet yet) | `SOLANA_NETWORK=mainnet`, `API_KEYS`, `RATE_LIMIT=1`, `RATE_LIMIT_TRUST_PROXY=1` |
 
 ```sh
 git push devnet main && git push origin main:devnet                 # same for devnet_skip; mainnet: git push heroku main
@@ -199,8 +219,8 @@ or run the Postman collection against the instance's environment (`npx newman ru
 
 ## Quick start
 
-1. Configure environment (.env) with network, RPC, signing key, and mints.  
-2. Build and run with Cargo or Docker.  
+1. Configure environment (.env) with at least `SIGNING_KEY` and `USDC_MINT` (the quote mint comes with each request), plus network and RPC as needed.  
+2. Build and run with Cargo (`cargo run`) or Docker.  
 3. Call `/health` to confirm network and retrieve the service public key.  
 4. Call `/check` with RFQ details (and `X-API-Key` when `API_KEYS` is set); pass `commit_hash`, and `liquidity_proof` into your preflight program instruction (SOLANA).
 
